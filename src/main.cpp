@@ -1,26 +1,33 @@
+/*
+ ==============================================================================
+  EDGE AI SMART RETAIL SCALE - ESP32-CAM TINYML COPROCESSOR & WEB DASHBOARD
+ ==============================================================================
+  Runs on-device quantized INT8 FOMO (Faster Objects, More Objects) neural 
+  network to identify fruit varieties (Apple, Orange, Pear) and benchmark 
+  the hardware performance of the ESP32-CAM.
+
+  Features:
+   - Real-time Edge Impulse FOMO Object Detection (Apple, Orange, Pear)
+   - Embedded Wi-Fi Web Server (SoftAP "ESP32-CAM-SCALE" @ 192.168.4.1)
+   - Live Browser Video Stream with Real-Time Metrology & Pricing HUD
+   - Simulated STM32 Metrology (Realistic weight, unit price, total price, sanity check)
+   - Thread-safe FreeRTOS camera access (zero DMA collision / freeze)
+   - Inter-Chip UART Link to STM32 Master (Serial2 on GPIO 14/15)
+   - Interactive Serial Testing Commands ('f'=flash, 'm'=mode, 'w'=weight, 'b'=benchmark)
+ ==============================================================================
+*/
+
 #include <Arduino.h>
 #include "esp_camera.h"
 #include <WiFi.h>
 #include "esp_http_server.h"
-#include "FS.h"
-#include "SD_MMC.h"
 #include "esp_system.h"
 
-/*
- ==============================================================================
-  AI-THINKER ESP32-CAM HARDWARE VERIFICATION & DIAGNOSTIC FIRMWARE
- ==============================================================================
-  This firmware validates all primary hardware subsystems of a new board:
-   1. ESP32 SoC Core, Revision, and Internal SRAM
-   2. 4MB External PSRAM (Integrity read/write test)
-   3. MicroSD Card Slot (1-bit SD_MMC test)
-   4. Onboard Flashlight LED (GPIO 4) & Status LED (GPIO 33)
-   5. OV2640 / OV7670 Camera Sensor (Capture test & parameter query)
-   6. Wi-Fi SoftAP ("ESP32-CAM-TEST") + Embedded HTTP Dashboard with MJPEG Stream
- ==============================================================================
-*/
+// Edge Impulse TinyML Vision Model
+#include <a3FruitVision_V1_inferencing.h>
+#include "edge-impulse-sdk/dsp/image/image.hpp"
 
-// --- AI-Thinker ESP32-CAM Pin Mapping ---
+// --- AI-Thinker ESP32-CAM Pin Configuration ---
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
@@ -39,141 +46,315 @@
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-#define FLASH_LED_PIN      4   // High-power White Flash LED (Active HIGH)
+#define FLASH_LED_PIN      4   // High-power White Flashlight LED (Active HIGH)
 #define STATUS_LED_PIN    33   // Small Red Onboard LED (Active LOW)
 
-// --- Configuration ---
-// Set to true if you want the ESP32 to connect to your Home Wi-Fi directly:
-#define CONNECT_TO_HOME_WIFI   false
+// --- Wi-Fi Configuration ---
+#define AP_SSID           "ESP32-CAM-SCALE"
+#define AP_PASS           ""   // Open network (no password needed)
 
-const char* HOME_SSID = "name";
-const char* HOME_PASS = "pass";
+// --- Inter-Chip UART to STM32 Master (Serial2) ---
+#define STM32_RX_PIN      14   // ESP32 RX from STM32 TX
+#define STM32_TX_PIN      15   // ESP32 TX to STM32 RX
+#define STM32_BAUD    115200
+HardwareSerial STM32_Serial(2);
 
-// SoftAP settings (used when CONNECT_TO_HOME_WIFI is false)
-const char* AP_SSID = "ESP32-CAM-TEST";
-const char* AP_PASS = "";  // Open network
+// --- Mock / Simulated STM32 Metrology & Pricing ---
+#define UNIT_PRICE_APPLE    2.50f  // $2.50 / kg
+#define UNIT_PRICE_ORANGE   3.00f  // $3.00 / kg
+#define UNIT_PRICE_PEAR     3.80f  // $3.80 / kg
 
-// HTTP Server Handle
-httpd_handle_t stream_httpd = NULL;
+enum MockWeightMode {
+    MOCK_WEIGHT_RANDOM,      // Realistic random weight per detected fruit
+    MOCK_WEIGHT_FIXED_200G,  // Fixed 200.0g test value
+    MOCK_WEIGHT_TOO_LIGHT    // 15.0g (fails sanity bounds check)
+};
+static MockWeightMode g_weight_mode = MOCK_WEIGHT_RANDOM;
 
-// Diagnostics results
-bool g_psram_ok = false;
-bool g_camera_ok = false;
-bool g_sdcard_ok = false;
-uint64_t g_sdcard_size_mb = 0;
-bool g_flash_state = false;
+// --- Live Telemetry Structure for Web & Serial ---
+struct LiveScaleTelemetry {
+    char label[16];
+    float confidence;
+    uint32_t x, y, w, h;
+    float weight_g;
+    float unit_price;
+    float total_price;
+    bool sanity_ok;
+    bool detected;
+    uint32_t dsp_ms;
+    uint32_t infer_ms;
+    uint32_t total_ms;
+    float fps;
+};
+static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f};
 
+// --- Camera & Inference Resolution ---
+#define CAMERA_RAW_WIDTH   320
+#define CAMERA_RAW_HEIGHT  240
+
+// Buffers & Sync
+static uint8_t *snapshot_buf = nullptr;
+static bool g_flash_state = false;
+static bool g_continuous_mode = true;
+static SemaphoreHandle_t s_camera_mutex = NULL;
+static httpd_handle_t s_httpd = NULL;
+
+// Benchmark Statistics
+static uint32_t g_inference_count = 0;
+static uint32_t g_total_infer_time_ms = 0;
+static uint32_t g_min_infer_time_ms = 99999;
+static uint32_t g_max_infer_time_ms = 0;
 
 // Function Prototypes
-void runSystemDiagnostics();
-bool testPSRAM();
-void testSDCard();
 bool initCamera();
-void startCameraServer();
+bool captureAndClassify();
+static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr);
+void startWebServer();
 void handleSerialCommands();
+void printBenchmarkReport();
 
 // ----------------------------------------------------------------------------
-// PSRAM Verification Test
+// Embedded HTML Dashboard
 // ----------------------------------------------------------------------------
-bool testPSRAM() {
-    Serial.println("\n[1/5] Testing External PSRAM...");
-    if (!psramFound()) {
-        Serial.println("  --> [FAIL] PSRAM was NOT detected by the ESP32 bootloader!");
-        Serial.println("      Note: AI-Thinker ESP32-CAM requires 4MB PSRAM for high resolutions.");
-        return false;
+static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edge AI Smart Scale</title>
+  <style>
+    :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --accent: #38bdf8; --green: #22c55e; --red: #ef4444; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 16px; }
+    .container { max-width: 760px; margin: 0 auto; }
+    h1 { text-align: center; color: var(--accent); margin-bottom: 4px; font-size: 1.5rem; }
+    p.sub { text-align: center; color: #94a3b8; margin-top: 0; margin-bottom: 16px; font-size: 0.85rem; }
+    .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+    .viewport-wrap { position: relative; width: 100%; border-radius: 8px; overflow: hidden; background: #000; text-align: center; min-height: 240px; }
+    #cam-view { width: 100%; max-height: 480px; object-fit: contain; display: block; }
+    .hud-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 14px; }
+    .hud-box { background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; text-align: center; }
+    .hud-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+    .hud-val { font-size: 1.15rem; font-weight: bold; margin-top: 4px; }
+    .badge-fruit { color: var(--green); }
+    .badge-empty { color: #64748b; }
+    .badge-pass { color: var(--green); }
+    .badge-fail { color: var(--red); }
+    .btn-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+    button { flex: 1; padding: 12px; font-size: 0.95rem; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; min-width: 130px; transition: 0.15s; }
+    .btn-flash { background: #eab308; color: #0f172a; }
+    .btn-weight { background: #8b5cf6; color: white; }
+    .btn-mode { background: #3b82f6; color: white; }
+    button:active { transform: scale(0.97); }
+    .telemetry-row { font-size: 0.8rem; color: #94a3b8; text-align: center; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Edge AI Smart Retail Scale</h1>
+    <p class="sub">TinyML Vision Coprocessor & Simulated Metrology Dashboard</p>
+
+    <div class="card">
+      <div class="viewport-wrap">
+        <img id="cam-view" src="/capture" alt="Live Camera View">
+      </div>
+      <div class="btn-row">
+        <button class="btn-flash" onclick="toggleFlash()">💡 Toggle Flashlight</button>
+        <button class="btn-weight" onclick="cycleWeight()">⚖️ Cycle Mock Weight</button>
+        <button class="btn-mode" onclick="triggerInference()">📸 Trigger Inference</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0; font-size: 1.1rem; color: var(--accent);">Real-Time Checkout Slip</h3>
+      <div class="hud-grid">
+        <div class="hud-box">
+          <div class="hud-label">Detected Fruit</div>
+          <div class="hud-val badge-fruit" id="val-item">Waiting...</div>
+        </div>
+        <div class="hud-box">
+          <div class="hud-label">Confidence</div>
+          <div class="hud-val" id="val-conf">-- %</div>
+        </div>
+        <div class="hud-box">
+          <div class="hud-label">Mass (Grams)</div>
+          <div class="hud-val" id="val-mass">-- g</div>
+        </div>
+        <div class="hud-box">
+          <div class="hud-label">Unit Price</div>
+          <div class="hud-val" id="val-unit">$-- / kg</div>
+        </div>
+        <div class="hud-box" style="border: 1px solid var(--accent);">
+          <div class="hud-label">Total Charge</div>
+          <div class="hud-val" style="color:var(--accent);" id="val-total">$--</div>
+        </div>
+        <div class="hud-box">
+          <div class="hud-label">Sanity Check</div>
+          <div class="hud-val badge-pass" id="val-sanity">OK</div>
+        </div>
+      </div>
+      <div class="telemetry-row" id="val-telemetry">
+        Timing: DSP -- ms | Infer -- ms | Total -- ms (-- FPS) | Die Temp: -- &deg;C
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function updateFrame() {
+      const view = document.getElementById('cam-view');
+      const img = new Image();
+      img.onload = () => {
+        view.src = img.src;
+        setTimeout(updateFrame, 40);
+      };
+      img.onerror = () => {
+        setTimeout(updateFrame, 200);
+      };
+      img.src = '/capture?t=' + Date.now();
     }
 
-    size_t psram_size = ESP.getPsramSize();
-    size_t free_psram = ESP.getFreePsram();
-    Serial.printf("  --> [PASS] PSRAM Detected! Total Size: %u bytes (%0.2f MB), Free: %u bytes\n", 
-                  psram_size, (float)psram_size / (1024.0 * 1024.0), free_psram);
-
-    // Read/write integrity stress test on 64KB block in PSRAM
-    const size_t test_size = 64 * 1024;
-    uint32_t* test_buf = (uint32_t*)ps_malloc(test_size);
-    if (!test_buf) {
-        Serial.println("  --> [FAIL] Failed to allocate 64KB test buffer in PSRAM!");
-        return false;
-    }
-
-    bool integrity_ok = true;
-    for (size_t i = 0; i < test_size / sizeof(uint32_t); i++) {
-        test_buf[i] = (uint32_t)(0xAA550000 | (i & 0xFFFF));
-    }
-    for (size_t i = 0; i < test_size / sizeof(uint32_t); i++) {
-        if (test_buf[i] != (uint32_t)(0xAA550000 | (i & 0xFFFF))) {
-            integrity_ok = false;
-            break;
-        }
-    }
-    free(test_buf);
-
-    if (integrity_ok) {
-        Serial.println("  --> [PASS] PSRAM 64KB Memory Integrity R/W Check: OK!");
-        return true;
-    } else {
-        Serial.println("  --> [FAIL] PSRAM Memory Integrity Corruption Detected!");
-        return false;
-    }
-}
-
-// ----------------------------------------------------------------------------
-// MicroSD Slot Verification Test (1-bit SD_MMC Mode)
-// ----------------------------------------------------------------------------
-void testSDCard() {
-    Serial.println("\n[2/5] Testing MicroSD Card Slot (1-bit MMC)...");
-    // Use 1-bit mode (second parameter = true) to prevent conflict with GPIO 4 (Flash LED)
-    if (SD_MMC.begin("/sdcard", true)) {
-        uint8_t cardType = SD_MMC.cardType();
-        if (cardType == CARD_NONE) {
-            Serial.println("  --> [WARN] Slot mounted but no valid media detected.");
-            g_sdcard_ok = false;
+    function pollTelemetry() {
+      fetch('/status').then(r => r.json()).then(d => {
+        const itemEl = document.getElementById('val-item');
+        if (d.detected) {
+          itemEl.innerText = d.label.toUpperCase();
+          itemEl.className = 'hud-val badge-fruit';
         } else {
-            g_sdcard_size_mb = SD_MMC.cardSize() / (1024 * 1024);
-            Serial.printf("  --> [PASS] MicroSD Card Detected! Type: %s, Capacity: %llu MB\n",
-                          (cardType == CARD_MMC) ? "MMC" :
-                          (cardType == CARD_SD)  ? "SDSC" :
-                          (cardType == CARD_SDHC)? "SDHC" : "UNKNOWN",
-                          g_sdcard_size_mb);
-            g_sdcard_ok = true;
+          itemEl.innerText = 'EMPTY SCALE';
+          itemEl.className = 'hud-val badge-empty';
         }
-    } else {
-        Serial.println("  --> [INFO] No MicroSD card inserted or slot unpopulated (Normal if empty).");
-        g_sdcard_ok = false;
+        document.getElementById('val-conf').innerText = d.confidence > 0 ? (d.confidence * 100).toFixed(1) + '%' : '--';
+        document.getElementById('val-mass').innerText = d.weight > 0 ? d.weight.toFixed(1) + ' g' : '0.0 g';
+        document.getElementById('val-unit').innerText = d.unit_price > 0 ? '$' + d.unit_price.toFixed(2) + ' / kg' : '--';
+        document.getElementById('val-total').innerText = d.total_price > 0 ? '$' + d.total_price.toFixed(2) : '$0.00';
+        
+        const sanityEl = document.getElementById('val-sanity');
+        if (!d.detected) {
+          sanityEl.innerText = 'IDLE';
+          sanityEl.className = 'hud-val badge-empty';
+        } else if (d.sanity_ok) {
+          sanityEl.innerText = 'PASSED';
+          sanityEl.className = 'hud-val badge-pass';
+        } else {
+          sanityEl.innerText = 'REJECTED';
+          sanityEl.className = 'hud-val badge-fail';
+        }
+
+        document.getElementById('val-telemetry').innerHTML =
+          'Timing: DSP ' + d.dsp_ms + ' ms | Infer ' + d.infer_ms + ' ms | Total ' + d.total_ms + ' ms (' + d.fps.toFixed(1) + ' FPS) | Die Temp: ' + d.temp.toFixed(1) + ' &deg;C | PSRAM Free: ' + d.psram_kb + ' KB';
+      }).catch(e => console.log(e));
+    }
+
+    function toggleFlash() { fetch('/flash').catch(e => console.log(e)); }
+    function cycleWeight() { fetch('/cycle_weight').then(pollTelemetry).catch(e => console.log(e)); }
+    function triggerInference() { fetch('/trigger').catch(e => console.log(e)); }
+
+    setInterval(pollTelemetry, 300);
+    pollTelemetry();
+    updateFrame();
+  </script>
+</body>
+</html>
+)rawliteral";
+
+// ----------------------------------------------------------------------------
+// HTTP Server Handlers
+// ----------------------------------------------------------------------------
+static esp_err_t index_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, DASHBOARD_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t capture_handler(httpd_req_t *req) {
+    if (xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(150)) == pdTRUE) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (!fb) {
+            xSemaphoreGive(s_camera_mutex);
+            httpd_resp_send_500(req);
+            return ESP_FAIL;
+        }
+        httpd_resp_set_type(req, "image/jpeg");
+        httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"capture.jpg\"");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+        esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+        esp_camera_fb_return(fb);
+        xSemaphoreGive(s_camera_mutex);
+        return res;
+    }
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+}
+
+static esp_err_t status_handler(httpd_req_t *req) {
+    char json[384];
+    snprintf(json, sizeof(json),
+             "{\"label\":\"%s\",\"confidence\":%.3f,\"x\":%u,\"y\":%u,\"weight\":%.1f,"
+             "\"unit_price\":%.2f,\"total_price\":%.2f,\"sanity_ok\":%s,\"detected\":%s,"
+             "\"dsp_ms\":%u,\"infer_ms\":%u,\"total_ms\":%u,\"fps\":%.1f,"
+             "\"temp\":%.1f,\"psram_kb\":%u,\"heap_kb\":%u}",
+             g_telemetry.label, g_telemetry.confidence, g_telemetry.x, g_telemetry.y,
+             g_telemetry.weight_g, g_telemetry.unit_price, g_telemetry.total_price,
+             g_telemetry.sanity_ok ? "true" : "false",
+             g_telemetry.detected ? "true" : "false",
+             g_telemetry.dsp_ms, g_telemetry.infer_ms, g_telemetry.total_ms, g_telemetry.fps,
+             temperatureRead(), ESP.getFreePsram() / 1024, ESP.getFreeHeap() / 1024);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t flash_handler(httpd_req_t *req) {
+    g_flash_state = !g_flash_state;
+    digitalWrite(FLASH_LED_PIN, g_flash_state ? HIGH : LOW);
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, g_flash_state ? "ON" : "OFF", HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t cycle_weight_handler(httpd_req_t *req) {
+    if (g_weight_mode == MOCK_WEIGHT_RANDOM) g_weight_mode = MOCK_WEIGHT_FIXED_200G;
+    else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) g_weight_mode = MOCK_WEIGHT_TOO_LIGHT;
+    else g_weight_mode = MOCK_WEIGHT_RANDOM;
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t trigger_handler(httpd_req_t *req) {
+    captureAndClassify();
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+}
+
+void startWebServer() {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+    config.ctrl_port = 32768;
+    config.max_open_sockets = 5;
+
+    httpd_uri_t uri_index = { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL };
+    httpd_uri_t uri_capture = { .uri = "/capture", .method = HTTP_GET, .handler = capture_handler, .user_ctx = NULL };
+    httpd_uri_t uri_status = { .uri = "/status", .method = HTTP_GET, .handler = status_handler, .user_ctx = NULL };
+    httpd_uri_t uri_flash = { .uri = "/flash", .method = HTTP_GET, .handler = flash_handler, .user_ctx = NULL };
+    httpd_uri_t uri_cycle = { .uri = "/cycle_weight", .method = HTTP_GET, .handler = cycle_weight_handler, .user_ctx = NULL };
+    httpd_uri_t uri_trigger = { .uri = "/trigger", .method = HTTP_GET, .handler = trigger_handler, .user_ctx = NULL };
+
+    if (httpd_start(&s_httpd, &config) == ESP_OK) {
+        httpd_register_uri_handler(s_httpd, &uri_index);
+        httpd_register_uri_handler(s_httpd, &uri_capture);
+        httpd_register_uri_handler(s_httpd, &uri_status);
+        httpd_register_uri_handler(s_httpd, &uri_flash);
+        httpd_register_uri_handler(s_httpd, &uri_cycle);
+        httpd_register_uri_handler(s_httpd, &uri_trigger);
+        Serial.println("[WEB] Embedded HTTP Server active on Port 80");
     }
 }
 
 // ----------------------------------------------------------------------------
-// Wi-Fi Event Callbacks (Tracks connect/disconnect/DHCP events in real time)
+// Camera Hardware Initialization
 // ----------------------------------------------------------------------------
-void onWiFiEvent(WiFiEvent_t event) {
-    switch (event) {
-        case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
-            Serial.println("\n[WIFI EVENT] A device connected to ESP32 SoftAP!");
-            break;
-        case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
-            Serial.println("\n[WIFI EVENT] Device disconnected from SoftAP. Cleaning up DHCP lease table...");
-            break;
-        case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:
-            Serial.println("[WIFI EVENT] IP address successfully assigned to client device.");
-            break;
-        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
-            Serial.println("\n[WIFI EVENT] Connected to router!");
-            break;
-        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-            Serial.print("[WIFI EVENT] Got IP: ");
-            Serial.println(WiFi.localIP());
-            break;
-        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-            Serial.println("\n[WIFI EVENT] Disconnected from router!");
-            break;
-        default:
-            break;
-    }
-}
-
 bool initCamera() {
-    Serial.println("\n[3/5] Initializing OV2640 Camera Sensor...");
+    Serial.println("\n[1/4] Initializing OV2640 Camera Sensor...");
 
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
@@ -196,516 +377,380 @@ bool initCamera() {
     config.pin_reset    = RESET_GPIO_NUM;
     config.xclk_freq_hz = 20000000;
     config.pixel_format = PIXFORMAT_JPEG;
-
-    if (g_psram_ok) {
-        // High quality with PSRAM
-        config.frame_size   = FRAMESIZE_VGA;  // 640x480
-        config.jpeg_quality = 12;             // 10-63 (lower = better quality)
-        config.fb_count     = 2;
-        config.grab_mode    = CAMERA_GRAB_LATEST;
-    } else {
-        // Safe fallback without PSRAM
-        config.frame_size   = FRAMESIZE_SVGA; // 800x600
-        config.jpeg_quality = 15;
-        config.fb_count     = 1;
-        config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
-    }
+    config.frame_size   = FRAMESIZE_QVGA;  // 320x240 for fast JPEG decoding
+    config.jpeg_quality = 12;              // High quality
+    config.fb_count     = 2;               // Double-buffered for speed
+    config.fb_location  = CAMERA_FB_IN_PSRAM;
+    config.grab_mode    = CAMERA_GRAB_LATEST;
 
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        Serial.printf("  --> [FAIL] Camera init failed with error code: 0x%x\n", err);
-        Serial.println("      Check camera ribbon cable seating and 5V power stability!");
+        Serial.printf("  --> [FAIL] Camera init error: 0x%x\n", err);
         return false;
     }
 
-    sensor_t* s = esp_camera_sensor_get();
+    sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
-        // Vertical flip / horizontal mirror if needed for AI-Thinker orientation
-        s->set_vflip(s, 1);
+        s->set_vflip(s, 1);    // Invert if mounted downward on scale bracket
         s->set_hmirror(s, 0);
-        Serial.printf("  --> [PASS] Camera Initialized! Sensor PID: 0x%02X\n", s->id.PID);
+        s->set_brightness(s, 0);
+        s->set_contrast(s, 1);
+        s->set_saturation(s, 1);
     }
 
-    // Capture a trial frame to test DMA & pixel pipeline
-    Serial.print("  --> Performing test capture... ");
-    uint32_t t_start = millis();
-    camera_fb_t* fb = esp_camera_fb_get();
-    uint32_t t_duration = millis() - t_start;
+    Serial.println("  --> [PASS] OV2640 camera ready!");
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Setup Function
+// ----------------------------------------------------------------------------
+void setup() {
+    Serial.begin(115200);
+    Serial.setRxBufferSize(1024);
+    delay(1000);
+
+    Serial.println("\n=======================================================");
+    Serial.println("  EDGE AI SMART SCALE: TINYML & WEB SERVER DASHBOARD   ");
+    Serial.println("=======================================================");
+
+    // Pin setup
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    pinMode(FLASH_LED_PIN, OUTPUT);
+    digitalWrite(STATUS_LED_PIN, HIGH); // Red LED OFF (Active LOW)
+    digitalWrite(FLASH_LED_PIN, LOW);   // Flashlight OFF
+
+    // Create FreeRTOS camera access mutex
+    s_camera_mutex = xSemaphoreCreateMutex();
+
+    // 1. Verify PSRAM
+    if (psramFound()) {
+        Serial.printf("[PSRAM] Detected! Total: %u KB, Free: %u KB\n",
+                      ESP.getPsramSize() / 1024, ESP.getFreePsram() / 1024);
+    } else {
+        Serial.println("[PSRAM] WARNING: External PSRAM not detected! Model may fail.");
+    }
+
+    // 2. Allocate RGB888 Snapshot Buffer in PSRAM (230 KB for 320x240x3)
+    size_t rgb_buf_size = CAMERA_RAW_WIDTH * CAMERA_RAW_HEIGHT * 3;
+    snapshot_buf = (uint8_t*)ps_malloc(rgb_buf_size);
+    if (!snapshot_buf) {
+        Serial.println("[MEMORY] Failed to allocate snapshot buffer in PSRAM! Falling back to malloc...");
+        snapshot_buf = (uint8_t*)malloc(rgb_buf_size);
+    }
+
+    if (!snapshot_buf) {
+        Serial.println("[CRITICAL ERROR] Insufficient memory for RGB snapshot buffer!");
+        while (1) { delay(1000); }
+    }
+    Serial.printf("[MEMORY] Allocated %u KB snapshot buffer successfully.\n", rgb_buf_size / 1024);
+
+    // 3. Initialize Camera
+    if (!initCamera()) {
+        Serial.println("[CRITICAL ERROR] Camera initialization failed!");
+        while (1) { delay(1000); }
+    }
+
+    // 4. Start Wi-Fi SoftAP
+    Serial.println("\n[WIFI] Initializing SoftAP...");
+    WiFi.mode(WIFI_AP);
+    WiFi.setTxPower(WIFI_POWER_13dBm); // Prevents USB brownout resets
+    WiFi.softAP(AP_SSID, AP_PASS, 6);
+    Serial.printf("  --> SoftAP SSID: %s\n", AP_SSID);
+    Serial.printf("  --> Web URL:     http://%s\n", WiFi.softAPIP().toString().c_str());
+
+    // 5. Start Web Server
+    startWebServer();
+
+    // 6. Initialize STM32 UART Link
+    STM32_Serial.begin(STM32_BAUD, SERIAL_8N1, STM32_RX_PIN, STM32_TX_PIN);
+    Serial.printf("[UART] STM32 inter-chip link ready on RX: GPIO %d, TX: GPIO %d @ %d baud\n",
+                  STM32_RX_PIN, STM32_TX_PIN, STM32_BAUD);
+
+    // 7. Model Overview
+    Serial.println("\n[MODEL SPECS]");
+    Serial.printf("  Project Name:     %s (Ver %d)\n", EI_CLASSIFIER_PROJECT_NAME, EI_CLASSIFIER_PROJECT_DEPLOY_VERSION);
+    Serial.printf("  Input Resolution: %d x %d (RGB888, %d features)\n",
+                  EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT, EI_CLASSIFIER_NN_INPUT_FRAME_SIZE);
+    Serial.printf("  Classes (%d):      ", EI_CLASSIFIER_LABEL_COUNT);
+    for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+        Serial.printf("%s%s", ei_classifier_inferencing_categories[i], (i + 1 < EI_CLASSIFIER_LABEL_COUNT) ? ", " : "\n");
+    }
+    Serial.printf("  Architecture:     FOMO (Object Detection) INT8 Quantized\n");
+    Serial.printf("  Tensor Arena:     %d KB required\n", EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE / 1024);
+
+    Serial.println("\n>> Starting inference loop in 2 seconds...");
+    Serial.println(">> Open http://192.168.4.1 in your browser for the Live Dashboard!");
+    Serial.println(">> Commands: [f] Flash | [m] Mode | [w] Weight Mode | [b] Benchmark | [?] Help\n");
+    delay(2000);
+}
+
+// ----------------------------------------------------------------------------
+// Capture Frame, Resize to 96x96, and Execute Neural Network
+// ----------------------------------------------------------------------------
+bool captureAndClassify() {
+    uint32_t t_cycle_start = millis();
+    camera_fb_t *fb = NULL;
+
+    // 1. Thread-safe frame grab
+    if (xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(150)) == pdTRUE) {
+        fb = esp_camera_fb_get();
+        if (fb) {
+            // Decode JPEG to RGB888 in snapshot_buf inside mutex
+            fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, snapshot_buf);
+            esp_camera_fb_return(fb); // Release frame buffer immediately
+        }
+        xSemaphoreGive(s_camera_mutex);
+    }
 
     if (!fb) {
-        Serial.println("[FAIL] Frame capture returned NULL!");
         return false;
     }
 
-    Serial.printf("[PASS] Captured %ux%u JPEG (%u bytes) in %u ms!\n",
-                  fb->width, fb->height, fb->len, t_duration);
-    esp_camera_fb_return(fb);
+    // 2. Crop and interpolate down to 96x96 for model input (outside mutex)
+    uint32_t t_decode_start = millis();
+    ei::image::processing::crop_and_interpolate_rgb888(
+        snapshot_buf,
+        CAMERA_RAW_WIDTH,
+        CAMERA_RAW_HEIGHT,
+        snapshot_buf,
+        EI_CLASSIFIER_INPUT_WIDTH,
+        EI_CLASSIFIER_INPUT_HEIGHT
+    );
+    uint32_t t_prep = millis() - t_decode_start;
+
+    // 3. Construct Edge Impulse signal
+    ei::signal_t signal;
+    signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
+    signal.get_data = &ei_camera_get_data;
+
+    // 4. Run inference
+    ei_impulse_result_t result = { 0 };
+    EI_IMPULSE_ERROR err = run_classifier(&signal, &result, false);
+
+    if (err != EI_IMPULSE_OK) {
+        Serial.printf("[ERROR] Classifier failed with error code: %d\n", err);
+        return false;
+    }
+
+    uint32_t t_total_cycle = millis() - t_cycle_start;
+    float current_fps = 1000.0f / (float)t_total_cycle;
+
+    // Track benchmark numbers
+    g_inference_count++;
+    g_total_infer_time_ms += result.timing.classification;
+    if (result.timing.classification < g_min_infer_time_ms) g_min_infer_time_ms = result.timing.classification;
+    if (result.timing.classification > g_max_infer_time_ms) g_max_infer_time_ms = result.timing.classification;
+
+    // 5. Parse Detections
+    bool detected_any = false;
+    const char* best_label = "none";
+    float best_confidence = 0.0f;
+    uint32_t best_x = 0, best_y = 0;
+
+#if EI_CLASSIFIER_OBJECT_DETECTION == 1
+    for (uint32_t i = 0; i < result.bounding_boxes_count; i++) {
+        ei_impulse_result_bounding_box_t bb = result.bounding_boxes[i];
+        if (bb.value >= 0.5f) { // Confidence threshold (50%)
+            detected_any = true;
+            if (bb.value > best_confidence) {
+                best_confidence = bb.value;
+                best_label = bb.label;
+                best_x = bb.x;
+                best_y = bb.y;
+            }
+        }
+    }
+#endif
+
+    // Visual feedback: brief red LED pulse if object detected
+    if (detected_any) {
+        digitalWrite(STATUS_LED_PIN, LOW); // ON
+    } else {
+        digitalWrite(STATUS_LED_PIN, HIGH); // OFF
+    }
+
+    // 6. Calculate Simulated Metrology & Pricing
+    float weight_g = 0.0f;
+    float unit_price = 0.0f;
+    float total_price = 0.0f;
+    bool sanity_ok = false;
+    const char* mode_str = "Random";
+
+    if (detected_any) {
+        if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) {
+            weight_g = 200.0f;
+            mode_str = "Fixed 200g";
+        } else if (g_weight_mode == MOCK_WEIGHT_TOO_LIGHT) {
+            weight_g = 15.0f;
+            mode_str = "Fault Test 15g";
+        } else {
+            // Realistic random weight with 0.1g resolution
+            if (strcmp(best_label, "apple") == 0)       weight_g = (float)random(1600, 2300) / 10.0f;
+            else if (strcmp(best_label, "orange") == 0) weight_g = (float)random(1400, 2000) / 10.0f;
+            else if (strcmp(best_label, "pear") == 0)   weight_g = (float)random(1800, 2700) / 10.0f;
+            else                                        weight_g = (float)random(1500, 2200) / 10.0f;
+            mode_str = "Random Realistic";
+        }
+
+        unit_price = 2.00f;
+        if (strcmp(best_label, "apple") == 0)       unit_price = UNIT_PRICE_APPLE;
+        else if (strcmp(best_label, "orange") == 0) unit_price = UNIT_PRICE_ORANGE;
+        else if (strcmp(best_label, "pear") == 0)   unit_price = UNIT_PRICE_PEAR;
+
+        total_price = (weight_g / 1000.0f) * unit_price;
+        sanity_ok = (weight_g >= 50.0f && weight_g <= 600.0f);
+    }
+
+    // 7. Update Live Telemetry for Web Dashboard
+    strncpy(g_telemetry.label, best_label, sizeof(g_telemetry.label) - 1);
+    g_telemetry.confidence = best_confidence;
+    g_telemetry.x = best_x;
+    g_telemetry.y = best_y;
+    g_telemetry.weight_g = weight_g;
+    g_telemetry.unit_price = unit_price;
+    g_telemetry.total_price = total_price;
+    g_telemetry.sanity_ok = sanity_ok;
+    g_telemetry.detected = detected_any;
+    g_telemetry.dsp_ms = result.timing.dsp;
+    g_telemetry.infer_ms = result.timing.classification;
+    g_telemetry.total_ms = t_total_cycle;
+    g_telemetry.fps = current_fps;
+
+    // 8. Output Result Log to Serial Monitor
+    if (detected_any) {
+        Serial.println("\n-------------------------------------------------------");
+        Serial.printf("  [#%u] ITEM DETECTED:  >> %s (%.1f%%) << at [x:%u, y:%u]\n",
+                      g_inference_count, best_label, best_confidence * 100.0f, best_x, best_y);
+        Serial.printf("  Simulated Mass:     %.1f g (%.3f kg) [%s]\n", weight_g, weight_g / 1000.0f, mode_str);
+        Serial.printf("  Unit Price:         $%.2f / kg\n", unit_price);
+        Serial.printf("  TOTAL CHARGE:       $%.2f\n", total_price);
+        Serial.printf("  Sanity Check:       %s\n", sanity_ok ? "PASSED (Valid fruit weight)" : "REJECTED (Weight too low / unstable)");
+        Serial.println("-------------------------------------------------------");
+    } else {
+        Serial.printf("\n[#%u] DETECTED: No fruit detected (Empty scale / Below threshold)\n", g_inference_count);
+    }
+
+    // Performance & Health Telemetry
+    Serial.printf("     Timing:  DSP: %d ms | Infer: %d ms | Total: %d ms (%.1f FPS)\n",
+                  result.timing.dsp, result.timing.classification, t_total_cycle, current_fps);
+    Serial.printf("     Memory:  Heap: %u KB free | PSRAM: %u KB free | Temp: %.1f C\n",
+                  ESP.getFreeHeap() / 1024, ESP.getFreePsram() / 1024, temperatureRead());
+
+    // 9. Forward Result to STM32 Master via UART (if connected)
+    if (detected_any) {
+        STM32_Serial.write(0xAA);
+        STM32_Serial.write(best_label[0]); // 'a'=apple, 'o'=orange, 'p'=pear
+        STM32_Serial.write((uint8_t)(best_confidence * 100.0f));
+        STM32_Serial.write(0x55);
+        delay(15);
+        digitalWrite(STATUS_LED_PIN, HIGH);
+    }
 
     return true;
 }
 
 // ----------------------------------------------------------------------------
-// System Diagnostics & Information Dump
+// Signal Callback: Converts RGB888 Snapshot to Edge Impulse Floats
 // ----------------------------------------------------------------------------
-void runSystemDiagnostics() {
-    Serial.println("\n=======================================================");
-    Serial.println("      AI-THINKER ESP32-CAM HARDWARE SELF-TEST REPORT   ");
-    Serial.println("=======================================================");
-    
-    esp_chip_info_t chip_info;
-    esp_chip_info(&chip_info);
-    Serial.printf("  SoC Model:          ESP32 (Cores: %d, Rev: %d)\n", chip_info.cores, chip_info.revision);
-    Serial.printf("  CPU Clock:          %u MHz\n", getCpuFrequencyMhz());
-    Serial.printf("  Flash Chip Size:    %u MB\n", ESP.getFlashChipSize() / (1024 * 1024));
-    Serial.printf("  Internal Free Heap: %u bytes\n", ESP.getFreeHeap());
-    Serial.printf("  Max Alloc Heap:     %u bytes\n", ESP.getMaxAllocHeap());
+static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
+    size_t pixel_ix = offset * 3;
+    size_t pixels_left = length;
+    size_t out_ptr_ix = 0;
 
-    // 1. PSRAM Test
-    g_psram_ok = testPSRAM();
-
-    // 2. MicroSD Card Test
-    testSDCard();
-
-    // 3. LED Indicators Quick Test
-    Serial.println("\n[4/5] Testing Onboard LEDs...");
-    pinMode(STATUS_LED_PIN, OUTPUT);
-    pinMode(FLASH_LED_PIN, OUTPUT);
-
-    // Flash status LED (GPIO 33 is active LOW)
-    for (int i = 0; i < 3; i++) {
-        digitalWrite(STATUS_LED_PIN, LOW);   // ON
-        delay(100);
-        digitalWrite(STATUS_LED_PIN, HIGH);  // OFF
-        delay(100);
+    while (pixels_left != 0) {
+        out_ptr[out_ptr_ix] = (snapshot_buf[pixel_ix + 2] << 16) +
+                              (snapshot_buf[pixel_ix + 1] << 8) +
+                              snapshot_buf[pixel_ix];
+        out_ptr_ix++;
+        pixel_ix += 3;
+        pixels_left--;
     }
-    Serial.println("  --> [PASS] Red Status LED (GPIO 33) tested.");
-
-    // Flash spotlight pulse (GPIO 4 is active HIGH)
-    digitalWrite(FLASH_LED_PIN, HIGH);
-    delay(100);
-    digitalWrite(FLASH_LED_PIN, LOW);
-    Serial.println("  --> [PASS] High-Power White Flash LED (GPIO 4) pulsed for 100ms.");
-
-    // 4. Camera Test
-    g_camera_ok = initCamera();
-
-    Serial.println("\n=======================================================");
-    Serial.println("                   SUMMARY RESULTS                     ");
-    Serial.println("=======================================================");
-    Serial.printf("  PSRAM (4MB):        %s\n", g_psram_ok ? "PASS" : "FAIL / NOT DETECTED");
-    Serial.printf("  Camera (OV2640):    %s\n", g_camera_ok ? "PASS" : "FAIL");
-    Serial.printf("  MicroSD Slot:       %s\n", g_sdcard_ok ? "MEDIA DETECTED" : "NO MEDIA / IDLE");
-    Serial.printf("  Status LED (IO33):  PASS\n");
-    Serial.printf("  Flash LED (IO4):    PASS\n");
-    Serial.println("=======================================================\n");
+    return 0;
 }
 
 // ----------------------------------------------------------------------------
-// Web Server & Streaming Endpoints
+// Main Loop
 // ----------------------------------------------------------------------------
-#define PART_BOUNDARY "123456789000000000000987654321"
-static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
-static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
-static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+void loop() {
+    handleSerialCommands();
 
-// HTML Web Dashboard
-static const char INDEX_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32-CAM Hardware Test</title>
-    <style>
-        :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --accent: #38bdf8; --success: #22c55e; --danger: #ef4444; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 15px; }
-        .container { max-width: 720px; margin: 0 auto; }
-        h1 { font-size: 1.5rem; text-align: center; margin-bottom: 5px; color: var(--accent); }
-        p.subtitle { text-align: center; color: #94a3b8; margin-top: 0; margin-bottom: 20px; font-size: 0.9rem; }
-        .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
-        .stream-container { position: relative; width: 100%; border-radius: 8px; overflow: hidden; background: #000; text-align: center; min-height: 240px; }
-        .stream-container img { width: 100%; max-height: 480px; object-fit: contain; display: block; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 10px; }
-        .stat-box { background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; text-align: center; }
-        .stat-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
-        .stat-val { font-size: 1.05rem; font-weight: bold; margin-top: 4px; }
-        .badge-pass { color: var(--success); }
-        .badge-fail { color: var(--danger); }
-        .btn-group { display: flex; gap: 10px; margin-top: 15px; flex-wrap: wrap; }
-        button { flex: 1; padding: 12px; font-size: 0.95rem; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; transition: 0.2s; min-width: 130px; }
-        .btn-primary { background: var(--accent); color: #0f172a; }
-        .btn-warn { background: #f59e0b; color: #0f172a; }
-        .btn-snap { background: #6366f1; color: #ffffff; }
-        button:active { transform: scale(0.97); }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>AI-Thinker ESP32-CAM</h1>
-        <p class="subtitle">Hardware Diagnostics & Live Stream</p>
-
-        <div class="card">
-            <div class="stream-container">
-                <img id="cam-view" src="/stream" alt="Live Camera Stream">
-            </div>
-            <div class="btn-group">
-                <button class="btn-primary" onclick="toggleFlash()">Toggle Flash LED</button>
-                <button class="btn-snap" onclick="takeSnapshot()">Download Photo</button>
-                <button class="btn-warn" onclick="reloadStream()">Restart Stream</button>
-            </div>
-        </div>
-
-        <div class="card">
-            <h3 style="margin-top:0; font-size: 1.1rem;">Hardware Status</h3>
-            <div class="grid" id="stats-grid">
-                <div class="stat-box"><div class="stat-label">Camera Sensor</div><div class="stat-val badge-pass" id="st-cam">OK</div></div>
-                <div class="stat-box"><div class="stat-label">PSRAM (4MB)</div><div class="stat-val" id="st-psram">Checking...</div></div>
-                <div class="stat-box"><div class="stat-label">Internal Heap</div><div class="stat-val" id="st-heap">-- KB</div></div>
-                <div class="stat-box"><div class="stat-label">MicroSD Slot</div><div class="stat-val" id="st-sd">--</div></div>
-                <div class="stat-box"><div class="stat-label">Die Temp</div><div class="stat-val" id="st-temp">-- &deg;C</div></div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        let isStreaming = true;
-        let activeImg = new Image();
-
-        function toggleFlash() {
-            fetch('/flash').then(r => r.text()).then(txt => {
-                console.log('Flash state:', txt);
-            });
+    // Check for capture command from STM32 UART (0xAA)
+    if (STM32_Serial.available()) {
+        uint8_t byte = STM32_Serial.read();
+        if (byte == 0xAA) {
+            Serial.println("\n[UART EVENT] Received capture trigger (0xAA) from STM32 Master!");
+            captureAndClassify();
+            return;
         }
-
-        function takeSnapshot() {
-            const a = document.createElement('a');
-            a.href = '/capture?t=' + Date.now();
-            a.download = 'esp32_photo_' + Date.now() + '.jpg';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-        }
-
-        // Client-Paced Zero-Buffer-Bloat Frame Loop
-        // Prevents TCP buffer buildup, keeps latency <50ms, and never crashes
-        function fetchNextFrame() {
-            if (!isStreaming) return;
-            const view = document.getElementById('cam-view');
-            activeImg = new Image();
-            activeImg.onload = () => {
-                view.src = activeImg.src;
-                // Fetch next frame immediately after rendering
-                setTimeout(fetchNextFrame, 30);
-            };
-            activeImg.onerror = () => {
-                // If a frame drops, wait 200ms and request a fresh one
-                setTimeout(fetchNextFrame, 200);
-            };
-            activeImg.src = '/capture?t=' + Date.now();
-        }
-
-        function reloadStream() {
-            isStreaming = true;
-            fetchNextFrame();
-        }
-
-        function fetchStatus() {
-            fetch('/status').then(r => r.json()).then(data => {
-                document.getElementById('st-cam').textContent = data.camera ? 'PASS' : 'FAIL';
-                document.getElementById('st-cam').className = 'stat-val ' + (data.camera ? 'badge-pass' : 'badge-fail');
-                
-                document.getElementById('st-psram').textContent = data.psram_ok ? (data.free_psram_kb + ' KB Free') : 'FAIL';
-                document.getElementById('st-psram').className = 'stat-val ' + (data.psram_ok ? 'badge-pass' : 'badge-fail');
-
-                document.getElementById('st-heap').textContent = data.free_heap_kb + ' KB';
-                document.getElementById('st-sd').textContent = data.sd_ok ? (data.sd_size_mb + ' MB') : 'Empty';
-                if (data.temp_c !== undefined) {
-                    document.getElementById('st-temp').textContent = data.temp_c.toFixed(1) + ' °C';
-                    document.getElementById('st-temp').className = 'stat-val ' + (data.temp_c > 75 ? 'badge-fail' : 'badge-pass');
-                }
-            }).catch(e => console.log(e));
-        }
-
-        setInterval(fetchStatus, 3000);
-        fetchStatus();
-        fetchNextFrame(); // Start zero-lag stream
-    </script>
-</body>
-</html>
-
-
-)rawliteral";
-
-// Handler for Index page
-static esp_err_t index_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
-}
-
-// Handler for Single Snapshot (/capture)
-static esp_err_t capture_handler(httpd_req_t *req) {
-    if (!g_camera_ok) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
-    httpd_resp_set_type(req, "image/jpeg");
-    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"capture.jpg\"");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
-    esp_camera_fb_return(fb);
-    return res;
-
-}
-
-// Handler for Continuous MJPEG Video Stream (/stream)
-static esp_err_t stream_handler(httpd_req_t *req) {
-    if (!g_camera_ok) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
     }
 
-    esp_err_t res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
-    if (res != ESP_OK) return res;
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-
-    char part_buf[64];
-    while (true) {
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) {
-            break;
-        }
-        size_t hlen = snprintf(part_buf, 64, _STREAM_PART, fb->len);
-        res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
-        if (res == ESP_OK) res = httpd_resp_send_chunk(req, part_buf, hlen);
-        if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
-        esp_camera_fb_return(fb);
-
-        if (res != ESP_OK) {
-            break;
-        }
-        // Throttle to ~10 FPS (80ms delay) to prevent thermal overload of ESP32 and AMS1117 regulator
-        vTaskDelay(pdMS_TO_TICKS(80));
-    }
-    return res;
-}
-
-
-// Handler for Flashlight Toggle (/flash)
-static esp_err_t flash_handler(httpd_req_t *req) {
-    g_flash_state = !g_flash_state;
-    digitalWrite(FLASH_LED_PIN, g_flash_state ? HIGH : LOW);
-    char buf[16];
-    snprintf(buf, sizeof(buf), "FLASH_%s", g_flash_state ? "ON" : "OFF");
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
-}
-
-// Handler for System Status JSON (/status)
-static esp_err_t status_handler(httpd_req_t *req) {
-    float temp_c = temperatureRead();
-    char json[256];
-    snprintf(json, sizeof(json),
-             "{\"camera\":%s,\"psram_ok\":%s,\"free_psram_kb\":%u,\"free_heap_kb\":%u,\"sd_ok\":%s,\"sd_size_mb\":%llu,\"flash\":%s,\"temp_c\":%.1f}",
-             g_camera_ok ? "true" : "false",
-             g_psram_ok ? "true" : "false",
-             (unsigned int)(ESP.getFreePsram() / 1024),
-             (unsigned int)(ESP.getFreeHeap() / 1024),
-             g_sdcard_ok ? "true" : "false",
-             g_sdcard_size_mb,
-             g_flash_state ? "true" : "false",
-             temp_c);
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
-}
-
-
-void startCameraServer() {
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = 80;
-    config.ctrl_port = 32768;   
-    config.stack_size = 4096;
-    config.lru_purge_enable = true;  // Auto-purge stale zombie sockets when connections drop
-    config.recv_wait_timeout = 4;    // 4s timeout instead of hanging 30s
-    config.send_wait_timeout = 4;
-
-    httpd_uri_t index_uri = { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL };
-    httpd_uri_t stream_uri = { .uri = "/stream", .method = HTTP_GET, .handler = stream_handler, .user_ctx = NULL };
-    httpd_uri_t capture_uri = { .uri = "/capture", .method = HTTP_GET, .handler = capture_handler, .user_ctx = NULL };
-    httpd_uri_t flash_uri = { .uri = "/flash", .method = HTTP_GET, .handler = flash_handler, .user_ctx = NULL };
-    httpd_uri_t status_uri = { .uri = "/status", .method = HTTP_GET, .handler = status_handler, .user_ctx = NULL };
-
-    if (httpd_start(&stream_httpd, &config) == ESP_OK) {
-        httpd_register_uri_handler(stream_httpd, &index_uri);
-        httpd_register_uri_handler(stream_httpd, &stream_uri);
-        httpd_register_uri_handler(stream_httpd, &capture_uri);
-        httpd_register_uri_handler(stream_httpd, &flash_uri);
-        httpd_register_uri_handler(stream_httpd, &status_uri);
-        Serial.println("[5/5] HTTP Streaming Server started on port 80!");
+    // In continuous mode, run inference repeatedly
+    if (g_continuous_mode) {
+        captureAndClassify();
+        delay(30); // Yield to FreeRTOS HTTP server and Wi-Fi stack
     } else {
-        Serial.println("[5/5] Failed to start HTTP server!");
+        delay(50);
     }
 }
 
-
 // ----------------------------------------------------------------------------
-// Interactive Serial Console Commands
+// Interactive Serial Commands
 // ----------------------------------------------------------------------------
 void handleSerialCommands() {
     if (Serial.available()) {
-        char cmd = (char)Serial.read();
-        while (Serial.available()) Serial.read(); // Flush extra chars
+        char ch = Serial.read();
+        if (ch == 'f' || ch == 'F') {
+            g_flash_state = !g_flash_state;
+            digitalWrite(FLASH_LED_PIN, g_flash_state ? HIGH : LOW);
+            Serial.printf("[COMMAND] Flash LED is now %s\n", g_flash_state ? "ON" : "OFF");
+        } else if (ch == 'm' || ch == 'M') {
+            g_continuous_mode = !g_continuous_mode;
+            Serial.printf("[COMMAND] Mode switched to: %s\n",
+                          g_continuous_mode ? "CONTINUOUS INFERENCE" : "TRIGGERED MODE (Press Space/trigger)");
+        } else if (ch == ' ' && !g_continuous_mode) {
+            Serial.println("[COMMAND] Spacebar trigger: Running single inference...");
+            captureAndClassify();
+        } else if (ch == 'w' || ch == 'W') {
+            if (g_weight_mode == MOCK_WEIGHT_RANDOM) g_weight_mode = MOCK_WEIGHT_FIXED_200G;
+            else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) g_weight_mode = MOCK_WEIGHT_TOO_LIGHT;
+            else g_weight_mode = MOCK_WEIGHT_RANDOM;
 
-        switch (cmd) {
-            case 'c':
-            case 'C': {
-                Serial.print("[COMMAND] Triggering test snapshot... ");
-                uint32_t t0 = millis();
-                camera_fb_t* fb = esp_camera_fb_get();
-                if (fb) {
-                    Serial.printf("OK! (%u bytes, %u ms)\n", fb->len, millis() - t0);
-                    esp_camera_fb_return(fb);
-                } else {
-                    Serial.println("FAILED!");
-                }
-                break;
-            }
-            case 'f':
-            case 'F': {
-                g_flash_state = !g_flash_state;
-                digitalWrite(FLASH_LED_PIN, g_flash_state ? HIGH : LOW);
-                Serial.printf("[COMMAND] Flash LED toggled -> %s\n", g_flash_state ? "ON" : "OFF");
-                break;
-            }
-            case 's':
-            case 'S': {
-                Serial.printf("[STATUS] Free Heap: %u KB | Free PSRAM: %u KB | Flash LED: %s | WiFi Clients: %d\n",
-                              ESP.getFreeHeap() / 1024, ESP.getFreePsram() / 1024,
-                              g_flash_state ? "ON" : "OFF", WiFi.softAPgetStationNum());
-                break;
-            }
-            case 'r':
-            case 'R': {
-                Serial.println("[COMMAND] Rebooting ESP32-CAM...");
-                delay(200);
-                ESP.restart();
-                break;
-            }
-            case 'w':
-            case 'W': {
-                Serial.println("[COMMAND] Resetting Wi-Fi SoftAP & clearing all client leases...");
-                WiFi.softAPdisconnect(true);
-                delay(400);
-                WiFi.softAP(AP_SSID, AP_PASS);
-                Serial.println("[COMMAND] SoftAP restarted fresh! Ready for reconnect.");
-                break;
-            }
-            case '?':
-            case 'h': {
-                Serial.println("\n--- Available Serial Commands ---");
-                Serial.println("  'c' -> Capture test snapshot");
-                Serial.println("  'f' -> Toggle Flash LED");
-                Serial.println("  's' -> Print memory & connection status");
-                Serial.println("  'w' -> Restart Wi-Fi AP (clears DHCP leases)");
-                Serial.println("  'r' -> Reboot ESP32");
-                Serial.println("---------------------------------");
-                break;
-            }
+            const char* str = (g_weight_mode == MOCK_WEIGHT_RANDOM) ? "RANDOM REALISTIC" :
+                              (g_weight_mode == MOCK_WEIGHT_FIXED_200G) ? "FIXED 200.0g" : "FAULT TEST 15.0g (fails sanity check)";
+            Serial.printf("[COMMAND] Simulated Weight Mode: %s\n", str);
+        } else if (ch == 'b' || ch == 'B') {
+            printBenchmarkReport();
+        } else if (ch == '?') {
+            Serial.println("\n--- INTERACTIVE COMMANDS ---");
+            Serial.println("  [f] Toggle High-Power Flashlight LED");
+            Serial.println("  [m] Toggle Continuous vs. Triggered mode");
+            Serial.println("  [w] Cycle Mock Weight Mode (Random -> Fixed 200g -> Fault 15g)");
+            Serial.println("  [Space] Trigger single inference (in Triggered mode)");
+            Serial.println("  [b] Print comprehensive Benchmark Performance Summary");
+            Serial.println("  [?] Print this help menu\n");
         }
     }
 }
 
 // ----------------------------------------------------------------------------
-// Main Setup & Loop
+// Benchmark Report Summary
 // ----------------------------------------------------------------------------
-void setup() {
-    Serial.begin(115200);
-    delay(1000);
-
-    // Register Wi-Fi Event listener to catch disconnects and DHCP leases live
-    WiFi.onEvent(onWiFiEvent);
-
-    // Run full hardware diagnostic
-    runSystemDiagnostics();
-
-    // Disable 802.11 modem sleep so laptop/phone never drops beacon sync
-    WiFi.setSleep(false);
-
-    // Setup Wi-Fi with reduced TX power to prevent thermal shutdown & current brownouts
-    if (CONNECT_TO_HOME_WIFI) {
-        Serial.printf("\nConnecting to Home Wi-Fi: %s ", HOME_SSID);
-        WiFi.mode(WIFI_STA);
-        WiFi.setTxPower(WIFI_POWER_13dBm);  // Cut RF power to prevent heat & brownouts
-        WiFi.begin(HOME_SSID, HOME_PASS);
-        uint32_t start_connect = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - start_connect < 15000) {
-            delay(500);
-            Serial.print(".");
-        }
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.println(" CONNECTED!");
-            Serial.printf("  --> Local IP:       http://%s\n", WiFi.localIP().toString().c_str());
-            Serial.printf("  --> Web Dashboard:  http://%s\n", WiFi.localIP().toString().c_str());
-        } else {
-            Serial.println("\n  --> Wi-Fi Connect Timeout! Falling back to SoftAP...");
-            WiFi.disconnect();
-            WiFi.mode(WIFI_AP);
-            WiFi.setTxPower(WIFI_POWER_13dBm);
-            WiFi.softAP(AP_SSID, AP_PASS, 6);
-            Serial.printf("  --> SoftAP SSID:    %s\n", AP_SSID);
-            Serial.printf("  --> Web Dashboard:  http://%s\n", WiFi.softAPIP().toString().c_str());
-        }
-    } else {
-        Serial.println("\nConfiguring Wi-Fi SoftAP...");
-        WiFi.mode(WIFI_AP);
-        // Lower TX power: cuts heat & prevents brownouts from weak USB ports
-        WiFi.setTxPower(WIFI_POWER_13dBm);
-        WiFi.softAP(AP_SSID, AP_PASS, 6);
-        Serial.printf("  --> SoftAP Started!\n");
-        Serial.printf("      SSID:      %s\n", AP_SSID);
-        Serial.printf("      Password:  (None - Open)\n");
-        Serial.printf("      Open URL:  http://%s\n", WiFi.softAPIP().toString().c_str());
+void printBenchmarkReport() {
+    Serial.println("\n=======================================================");
+    Serial.println("          HARDWARE INFERENCE BENCHMARK REPORT          ");
+    Serial.println("=======================================================");
+    Serial.printf("  Total Inferences:        %u\n", g_inference_count);
+    if (g_inference_count > 0) {
+        float avg_infer = (float)g_total_infer_time_ms / (float)g_inference_count;
+        Serial.printf("  Avg Inference Latency:   %.1f ms\n", avg_infer);
+        Serial.printf("  Min Inference Latency:   %u ms\n", g_min_infer_time_ms);
+        Serial.printf("  Max Inference Latency:   %u ms\n", g_max_infer_time_ms);
+        Serial.printf("  Estimated Model FPS:     %.1f FPS\n", 1000.0f / avg_infer);
     }
-
-
-    // Start Web Server
-    startCameraServer();
-
-    Serial.println("\n>> Board verification test is READY!");
-    if (CONNECT_TO_HOME_WIFI && WiFi.status() == WL_CONNECTED) {
-        Serial.printf(">> Open your browser and navigate to: http://%s\n", WiFi.localIP().toString().c_str());
-    } else {
-        Serial.println(">> Connect your phone or PC to Wi-Fi: 'ESP32-CAM-TEST'");
-        Serial.println(">> Open your browser and navigate to: http://192.168.4.1");
-    }
-    Serial.println(">> Type '?' in this Serial Monitor for interactive commands.\n");
+    Serial.printf("  Internal SRAM Free:      %u KB / %u KB\n", ESP.getFreeHeap() / 1024, ESP.getHeapSize() / 1024);
+    Serial.printf("  External PSRAM Free:     %u KB / %u KB\n", ESP.getFreePsram() / 1024, ESP.getPsramSize() / 1024);
+    Serial.printf("  CPU Clock Speed:         %u MHz\n", getCpuFrequencyMhz());
+    Serial.printf("  SoC Die Temperature:     %.1f C\n", temperatureRead());
+    Serial.println("=======================================================\n");
 }
-
-void loop() {
-    // Process interactive serial commands
-    handleSerialCommands();
-
-    // Heartbeat: Blink Red Status LED every 3 seconds (Active LOW) & check thermal health
-    static uint32_t last_heartbeat = 0;
-    if (millis() - last_heartbeat > 3000) {
-        last_heartbeat = millis();
-        digitalWrite(STATUS_LED_PIN, LOW);  // Turn ON red LED
-        delay(25);                          // Brief blip
-        digitalWrite(STATUS_LED_PIN, HIGH); // Turn OFF
-
-        float current_temp = temperatureRead();
-        if (current_temp > 80.0) {
-            Serial.printf("[THERMAL WARNING] Die Temp is high: %.1f C! Ensure board has air circulation.\n", current_temp);
-        }
-    }
-
-    delay(10);
-}
-

@@ -20,7 +20,7 @@ from PIL import Image, ImageTk
 
 # Default Settings
 DEFAULT_ESP_IP = "192.168.4.1"  # Default SoftAP IP (use router IP if on home Wi-Fi)
-DEFAULT_CLASSES = ["apple", "banana", "orange", "empty_scale"]
+DEFAULT_CLASSES = ["pear", "apple", "orange", "empty_scale"]
 OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dataset"))
 
 

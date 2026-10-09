@@ -6,18 +6,18 @@
 
 /*
  ==============================================================================
-  AI-THINKER ESP32-CAM: DEDICATED DATASET GATHERING FIRMWARE (gather.cpp)
+        AI-THINKER ESP32-CAM: DEDICATED DATASET GATHERING FIRMWARE 
  ==============================================================================
   Designed specifically for high-speed, zero-cable dataset collection for
   TinyML / Edge Impulse model training.
 
   Features:
-   - Wi-Fi SoftAP ("ESP32-CAM-TEST") or optional Home Wi-Fi
+   - Wi-Fi SoftAP ("ESP32-CAM-TEST") 
    - Stable RF power profile (13 dBm) to eliminate USB-FTDI brownouts
    - High-quality VGA (640x480) JPEG capture via external 4MB PSRAM
    - Dual-buffer latest-frame grab pipeline (zero lag preview)
    - Visual shutter feedback (red status LED blinks on every capture)
-   - Flash LED toggle (/flash) for consistent artificial illumination
+   - Flash LED toggle (/flash) 
    - Endpoints: /capture, /stream, /flash, /status, and / (browser preview)
  ==============================================================================
 */
@@ -85,7 +85,7 @@ static const char DATA_COLLECTOR_HTML[] PROGMEM = R"rawliteral(
         .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
         button { flex: 1; padding: 12px; font-size: 1rem; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; min-width: 130px; }
         .btn-snap { background: var(--green); color: white; }
-        .btn-flash { background: #eab308; color: #0f172a; }
+        .btn-flash { background: #a9e1fc; color: #0f172a; }
         .btn-stream { background: var(--accent); color: #0f172a; }
         .stat { color: #38bdf8; font-weight: bold; }
     </style>
@@ -98,7 +98,7 @@ static const char DATA_COLLECTOR_HTML[] PROGMEM = R"rawliteral(
             <img id="stream" src="/capture" alt="Stream">
         </div>
         <div class="btn-row">
-            <button class="btn-snap" onclick="snap()">📸 Download Still</button>
+            <button class="btn-snap" onclick="snap()">📸 Snapshot</button>
             <button class="btn-flash" onclick="toggleFlash()">💡 Toggle Flash</button>
             <button class="btn-stream" onclick="toggleLive()">▶ Live Feed</button>
         </div>
@@ -197,7 +197,7 @@ static esp_err_t status_handler(httpd_req_t *req) {
 }
 
 // 5. GET /stream -> Continuous MJPEG Video Feed
-static esp_err_t stream_handler(httpd_req_t *req) {
+static esp_err_t stream_handler(httpd_req_t *req) { 
     esp_err_t res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
     if (res != ESP_OK) return res;
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
