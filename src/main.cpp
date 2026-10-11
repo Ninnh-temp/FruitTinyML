@@ -85,8 +85,14 @@ struct LiveScaleTelemetry {
     uint32_t infer_ms;
     uint32_t total_ms;
     float fps;
+    uint8_t votes;
+    uint8_t burst_total;
 };
-static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f};
+static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f, 0, 4};
+
+// --- Burst Voting Configuration (Temporal Consensus Ensemble) ---
+#define BURST_SAMPLE_COUNT     4    // Frames captured per inference event
+#define BURST_FRAME_DELAY_MS  25    // Yield interval between burst frames for exposure/FreeRTOS
 
 // --- Camera & Inference Resolution ---
 #define CAMERA_RAW_WIDTH   320
@@ -95,7 +101,7 @@ static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0
 // Buffers & Sync
 static uint8_t *snapshot_buf = nullptr;
 static bool g_flash_state = false;
-static bool g_continuous_mode = true;
+static bool g_continuous_mode = false; // Default: Triggered burst mode for high-FPS live stream
 static SemaphoreHandle_t s_camera_mutex = NULL;
 static httpd_handle_t s_httpd = NULL;
 
@@ -107,7 +113,7 @@ static uint32_t g_max_infer_time_ms = 0;
 
 // Function Prototypes
 bool initCamera();
-bool captureAndClassify();
+bool runBurstInference();
 static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr);
 void startWebServer();
 void handleSerialCommands();
@@ -161,7 +167,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       <div class="btn-row">
         <button class="btn-flash" onclick="toggleFlash()">💡 Toggle Flashlight</button>
         <button class="btn-weight" onclick="cycleWeight()">⚖️ Cycle Mock Weight</button>
-        <button class="btn-mode" onclick="triggerInference()">📸 Trigger Inference</button>
+        <button class="btn-mode" onclick="triggerInference()">📸 Trigger Burst AI</button>
       </div>
     </div>
 
@@ -171,6 +177,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
         <div class="hud-box">
           <div class="hud-label">Detected Fruit</div>
           <div class="hud-val badge-fruit" id="val-item">Waiting...</div>
+          <div style="font-size:0.75rem; color:#94a3b8; margin-top:4px;" id="val-votes">Ready</div>
         </div>
         <div class="hud-box">
           <div class="hud-label">Confidence</div>
@@ -205,7 +212,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       const img = new Image();
       img.onload = () => {
         view.src = img.src;
-        setTimeout(updateFrame, 40);
+        setTimeout(updateFrame, 80);
       };
       img.onerror = () => {
         setTimeout(updateFrame, 200);
@@ -216,12 +223,15 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     function pollTelemetry() {
       fetch('/status').then(r => r.json()).then(d => {
         const itemEl = document.getElementById('val-item');
+        const votesEl = document.getElementById('val-votes');
         if (d.detected) {
           itemEl.innerText = d.label.toUpperCase();
           itemEl.className = 'hud-val badge-fruit';
+          votesEl.innerText = d.votes + '/' + d.burst_total + ' frames (' + Math.round((d.votes / d.burst_total) * 100) + '% consensus)';
         } else {
           itemEl.innerText = 'EMPTY SCALE';
           itemEl.className = 'hud-val badge-empty';
+          votesEl.innerText = '0/' + d.burst_total + ' (No Fruit)';
         }
         document.getElementById('val-conf').innerText = d.confidence > 0 ? (d.confidence * 100).toFixed(1) + '%' : '--';
         document.getElementById('val-mass').innerText = d.weight > 0 ? d.weight.toFixed(1) + ' g' : '0.0 g';
@@ -287,17 +297,19 @@ static esp_err_t capture_handler(httpd_req_t *req) {
 }
 
 static esp_err_t status_handler(httpd_req_t *req) {
-    char json[384];
+    char json[448];
     snprintf(json, sizeof(json),
              "{\"label\":\"%s\",\"confidence\":%.3f,\"x\":%u,\"y\":%u,\"weight\":%.1f,"
              "\"unit_price\":%.2f,\"total_price\":%.2f,\"sanity_ok\":%s,\"detected\":%s,"
              "\"dsp_ms\":%u,\"infer_ms\":%u,\"total_ms\":%u,\"fps\":%.1f,"
+             "\"votes\":%u,\"burst_total\":%u,"
              "\"temp\":%.1f,\"psram_kb\":%u,\"heap_kb\":%u}",
              g_telemetry.label, g_telemetry.confidence, g_telemetry.x, g_telemetry.y,
              g_telemetry.weight_g, g_telemetry.unit_price, g_telemetry.total_price,
              g_telemetry.sanity_ok ? "true" : "false",
              g_telemetry.detected ? "true" : "false",
              g_telemetry.dsp_ms, g_telemetry.infer_ms, g_telemetry.total_ms, g_telemetry.fps,
+             g_telemetry.votes, g_telemetry.burst_total,
              temperatureRead(), ESP.getFreePsram() / 1024, ESP.getFreeHeap() / 1024);
 
     httpd_resp_set_type(req, "application/json");
@@ -316,12 +328,13 @@ static esp_err_t cycle_weight_handler(httpd_req_t *req) {
     if (g_weight_mode == MOCK_WEIGHT_RANDOM) g_weight_mode = MOCK_WEIGHT_FIXED_200G;
     else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) g_weight_mode = MOCK_WEIGHT_TOO_LIGHT;
     else g_weight_mode = MOCK_WEIGHT_RANDOM;
+    runBurstInference();
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t trigger_handler(httpd_req_t *req) {
-    captureAndClassify();
+    runBurstInference();
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
 }
@@ -406,9 +419,11 @@ bool initCamera() {
 // Setup Function
 // ----------------------------------------------------------------------------
 void setup() {
+    delay(500); // 3.3V rail cold power stabilization delay
+
     Serial.begin(115200);
     Serial.setRxBufferSize(1024);
-    delay(1000);
+    delay(300);
 
     Serial.println("\n=======================================================");
     Serial.println("  EDGE AI SMART SCALE: TINYML & WEB SERVER DASHBOARD   ");
@@ -441,26 +456,35 @@ void setup() {
 
     if (!snapshot_buf) {
         Serial.println("[CRITICAL ERROR] Insufficient memory for RGB snapshot buffer!");
-        while (1) { delay(1000); }
-    }
-    Serial.printf("[MEMORY] Allocated %u KB snapshot buffer successfully.\n", rgb_buf_size / 1024);
-
-    // 3. Initialize Camera
-    if (!initCamera()) {
-        Serial.println("[CRITICAL ERROR] Camera initialization failed!");
-        while (1) { delay(1000); }
+    } else {
+        Serial.printf("[MEMORY] Allocated %u KB snapshot buffer successfully.\n", rgb_buf_size / 1024);
     }
 
-    // 4. Start Wi-Fi SoftAP
+    // 3. Start Wi-Fi SoftAP FIRST (Guarantees Wi-Fi is NEVER blocked by cold camera)
     Serial.println("\n[WIFI] Initializing SoftAP...");
     WiFi.mode(WIFI_AP);
-    WiFi.setTxPower(WIFI_POWER_13dBm); // Prevents USB brownout resets
+    WiFi.setTxPower(WIFI_POWER_15dBm);
     WiFi.softAP(AP_SSID, AP_PASS, 6);
     Serial.printf("  --> SoftAP SSID: %s\n", AP_SSID);
     Serial.printf("  --> Web URL:     http://%s\n", WiFi.softAPIP().toString().c_str());
 
-    // 5. Start Web Server
+    // 4. Start Embedded Web Server
     startWebServer();
+
+    // 5. Initialize Camera with Cold-Boot Retry Loop
+    delay(200);
+    bool cam_ok = false;
+    for (int retry = 0; retry < 3; retry++) {
+        if (initCamera()) {
+            cam_ok = true;
+            break;
+        }
+        Serial.printf("[CAMERA] Cold boot retry %d/3 initializing OV2640...\n", retry + 1);
+        delay(300);
+    }
+    if (!cam_ok) {
+        Serial.println("[CRITICAL ERROR] Camera failed after 3 attempts! Check ribbon connector.");
+    }
 
     // 6. Initialize STM32 UART Link
     STM32_Serial.begin(STM32_BAUD, SERIAL_8N1, STM32_RX_PIN, STM32_TX_PIN);
@@ -477,100 +501,183 @@ void setup() {
         Serial.printf("%s%s", ei_classifier_inferencing_categories[i], (i + 1 < EI_CLASSIFIER_LABEL_COUNT) ? ", " : "\n");
     }
     Serial.printf("  Architecture:     FOMO (Object Detection) INT8 Quantized\n");
+    Serial.printf("  Ensemble Mode:    %d-Frame Burst Consensus Voting\n", BURST_SAMPLE_COUNT);
     Serial.printf("  Tensor Arena:     %d KB required\n", EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE / 1024);
 
-    Serial.println("\n>> Starting inference loop in 2 seconds...");
-    Serial.println(">> Open http://192.168.4.1 in your browser for the Live Dashboard!");
-    Serial.println(">> Commands: [f] Flash | [m] Mode | [w] Weight Mode | [b] Benchmark | [?] Help\n");
-    delay(2000);
+    Serial.println("\n>> System Ready! Open http://192.168.4.1 in your browser.");
+    Serial.println(">> Commands: [f] Flash | [m] Mode | [w] Weight Mode | [b] Benchmark | [Space] Trigger Burst\n");
 }
 
 // ----------------------------------------------------------------------------
-// Capture Frame, Resize to 96x96, and Execute Neural Network
+// Burst Voting Inference (Temporal Consensus Ensemble)
 // ----------------------------------------------------------------------------
-bool captureAndClassify() {
-    uint32_t t_cycle_start = millis();
-    camera_fb_t *fb = NULL;
+bool runBurstInference() {
+    if (!snapshot_buf) {
+        Serial.println("[ERROR] Cannot infer: Snapshot buffer not allocated.");
+        return false;
+    }
 
-    // 1. Thread-safe frame grab
-    if (xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(150)) == pdTRUE) {
-        fb = esp_camera_fb_get();
-        if (fb) {
-            // Decode JPEG to RGB888 in snapshot_buf inside mutex
-            fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, snapshot_buf);
-            esp_camera_fb_return(fb); // Release frame buffer immediately
+    uint32_t t_burst_start = millis();
+    Serial.println("\n=======================================================");
+    Serial.printf(" [BURST INFERENCE] Capturing %d frames for consensus...\n", BURST_SAMPLE_COUNT);
+    Serial.println("=======================================================");
+
+    // Vote counters and confidence accumulators per class
+    uint8_t votes_apple = 0, votes_orange = 0, votes_pear = 0;
+    float conf_sum_apple = 0.0f, conf_sum_orange = 0.0f, conf_sum_pear = 0.0f;
+    uint32_t best_x_apple = 0, best_y_apple = 0;
+    uint32_t best_x_orange = 0, best_y_orange = 0;
+    uint32_t best_x_pear = 0, best_y_pear = 0;
+
+    uint32_t total_dsp_ms = 0;
+    uint32_t total_infer_ms = 0;
+    uint8_t valid_frames = 0;
+
+    for (int frame = 0; frame < BURST_SAMPLE_COUNT; frame++) {
+        // 1. Thread-safe snapshot grab (releases mutex immediately after copy)
+        camera_fb_t *fb = NULL;
+        if (xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            fb = esp_camera_fb_get();
+            if (fb) {
+                fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, snapshot_buf);
+                esp_camera_fb_return(fb);
+            }
+            xSemaphoreGive(s_camera_mutex);
         }
-        xSemaphoreGive(s_camera_mutex);
-    }
 
-    if (!fb) {
-        return false;
-    }
+        if (!fb) {
+            Serial.printf("  ├─ Frame %d/%d: [FAIL] Camera buffer acquire timeout\n", frame + 1, BURST_SAMPLE_COUNT);
+            delay(10);
+            continue;
+        }
 
-    // 2. Crop and interpolate down to 96x96 for model input (outside mutex)
-    uint32_t t_decode_start = millis();
-    ei::image::processing::crop_and_interpolate_rgb888(
-        snapshot_buf,
-        CAMERA_RAW_WIDTH,
-        CAMERA_RAW_HEIGHT,
-        snapshot_buf,
-        EI_CLASSIFIER_INPUT_WIDTH,
-        EI_CLASSIFIER_INPUT_HEIGHT
-    );
-    uint32_t t_prep = millis() - t_decode_start;
+        valid_frames++;
 
-    // 3. Construct Edge Impulse signal
-    ei::signal_t signal;
-    signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
-    signal.get_data = &ei_camera_get_data;
+        // 2. Crop and interpolate down to 96x96 (runs outside camera mutex)
+        ei::image::processing::crop_and_interpolate_rgb888(
+            snapshot_buf,
+            CAMERA_RAW_WIDTH,
+            CAMERA_RAW_HEIGHT,
+            snapshot_buf,
+            EI_CLASSIFIER_INPUT_WIDTH,
+            EI_CLASSIFIER_INPUT_HEIGHT
+        );
 
-    // 4. Run inference
-    ei_impulse_result_t result = { 0 };
-    EI_IMPULSE_ERROR err = run_classifier(&signal, &result, false);
+        // 3. Construct Edge Impulse signal
+        ei::signal_t signal;
+        signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
+        signal.get_data = &ei_camera_get_data;
 
-    if (err != EI_IMPULSE_OK) {
-        Serial.printf("[ERROR] Classifier failed with error code: %d\n", err);
-        return false;
-    }
+        // 4. Run Edge Impulse FOMO Model
+        ei_impulse_result_t result = { 0 };
+        EI_IMPULSE_ERROR err = run_classifier(&signal, &result, false);
 
-    uint32_t t_total_cycle = millis() - t_cycle_start;
-    float current_fps = 1000.0f / (float)t_total_cycle;
+        if (err != EI_IMPULSE_OK) {
+            Serial.printf("  ├─ Frame %d/%d: [ERROR] Classifier returned code %d\n", frame + 1, BURST_SAMPLE_COUNT, err);
+            continue;
+        }
 
-    // Track benchmark numbers
-    g_inference_count++;
-    g_total_infer_time_ms += result.timing.classification;
-    if (result.timing.classification < g_min_infer_time_ms) g_min_infer_time_ms = result.timing.classification;
-    if (result.timing.classification > g_max_infer_time_ms) g_max_infer_time_ms = result.timing.classification;
+        total_dsp_ms += result.timing.dsp;
+        total_infer_ms += result.timing.classification;
 
-    // 5. Parse Detections
-    bool detected_any = false;
-    const char* best_label = "none";
-    float best_confidence = 0.0f;
-    uint32_t best_x = 0, best_y = 0;
+        // Track global benchmark numbers
+        g_inference_count++;
+        g_total_infer_time_ms += result.timing.classification;
+        if (result.timing.classification < g_min_infer_time_ms) g_min_infer_time_ms = result.timing.classification;
+        if (result.timing.classification > g_max_infer_time_ms) g_max_infer_time_ms = result.timing.classification;
+
+        // 5. Parse bounding boxes for this frame
+        bool detected_in_frame = false;
+        const char* frame_best_label = "none";
+        float frame_best_conf = 0.0f;
+        uint32_t frame_x = 0, frame_y = 0;
 
 #if EI_CLASSIFIER_OBJECT_DETECTION == 1
-    for (uint32_t i = 0; i < result.bounding_boxes_count; i++) {
-        ei_impulse_result_bounding_box_t bb = result.bounding_boxes[i];
-        if (bb.value >= 0.5f) { // Confidence threshold (50%)
-            detected_any = true;
-            if (bb.value > best_confidence) {
-                best_confidence = bb.value;
-                best_label = bb.label;
-                best_x = bb.x;
-                best_y = bb.y;
+        for (uint32_t i = 0; i < result.bounding_boxes_count; i++) {
+            ei_impulse_result_bounding_box_t bb = result.bounding_boxes[i];
+            if (bb.value >= 0.45f) { // FOMO threshold
+                detected_in_frame = true;
+                if (bb.value > frame_best_conf) {
+                    frame_best_conf = bb.value;
+                    frame_best_label = bb.label;
+                    frame_x = bb.x;
+                    frame_y = bb.y;
+                }
             }
         }
-    }
 #endif
 
-    // Visual feedback: brief red LED pulse if object detected
+        if (detected_in_frame) {
+            if (strcasecmp(frame_best_label, "apple") == 0) {
+                votes_apple++;
+                conf_sum_apple += frame_best_conf;
+                best_x_apple = frame_x; best_y_apple = frame_y;
+            } else if (strcasecmp(frame_best_label, "orange") == 0) {
+                votes_orange++;
+                conf_sum_orange += frame_best_conf;
+                best_x_orange = frame_x; best_y_orange = frame_y;
+            } else if (strcasecmp(frame_best_label, "pear") == 0) {
+                votes_pear++;
+                conf_sum_pear += frame_best_conf;
+                best_x_pear = frame_x; best_y_pear = frame_y;
+            }
+
+            Serial.printf("  ├─ Frame %d/%d: '%s' (%.1f%%) @ [%u, %u] (%u ms)\n",
+                          frame + 1, BURST_SAMPLE_COUNT, frame_best_label,
+                          frame_best_conf * 100.0f, frame_x, frame_y, result.timing.classification);
+        } else {
+            Serial.printf("  ├─ Frame %d/%d: No fruit / Below threshold (%u ms)\n",
+                          frame + 1, BURST_SAMPLE_COUNT, result.timing.classification);
+        }
+
+        // Yield between frames to let sensor exposure settle and Wi-Fi service packets
+        if (frame + 1 < BURST_SAMPLE_COUNT) {
+            delay(BURST_FRAME_DELAY_MS);
+        }
+    }
+
+    uint32_t t_burst_total = millis() - t_burst_start;
+
+    // 6. Tally Ensemble Votes & Determine Consensus Winner
+    const char* winner_label = "none";
+    uint8_t winner_votes = 0;
+    float winner_avg_conf = 0.0f;
+    uint32_t winner_x = 0, winner_y = 0;
+    bool detected_any = false;
+
+    // Evaluate Apple
+    if (votes_apple > winner_votes || (votes_apple == winner_votes && conf_sum_apple > 0.0f && winner_votes > 0)) {
+        winner_votes = votes_apple;
+        winner_label = "apple";
+        winner_avg_conf = conf_sum_apple / votes_apple;
+        winner_x = best_x_apple; winner_y = best_y_apple;
+        detected_any = true;
+    }
+    // Evaluate Orange
+    if (votes_orange > winner_votes || (votes_orange == winner_votes && conf_sum_orange > (winner_avg_conf * winner_votes))) {
+        winner_votes = votes_orange;
+        winner_label = "orange";
+        winner_avg_conf = conf_sum_orange / votes_orange;
+        winner_x = best_x_orange; winner_y = best_y_orange;
+        detected_any = true;
+    }
+    // Evaluate Pear
+    if (votes_pear > winner_votes || (votes_pear == winner_votes && conf_sum_pear > (winner_avg_conf * winner_votes))) {
+        winner_votes = votes_pear;
+        winner_label = "pear";
+        winner_avg_conf = conf_sum_pear / votes_pear;
+        winner_x = best_x_pear; winner_y = best_y_pear;
+        detected_any = true;
+    }
+
+    // Visual LED Pulse on detection
     if (detected_any) {
-        digitalWrite(STATUS_LED_PIN, LOW); // ON
+        digitalWrite(STATUS_LED_PIN, LOW); // Red LED ON
     } else {
         digitalWrite(STATUS_LED_PIN, HIGH); // OFF
     }
 
-    // 6. Calculate Simulated Metrology & Pricing
+    // 7. Calculate Simulated Metrology & Pricing
     float weight_g = 0.0f;
     float unit_price = 0.0f;
     float total_price = 0.0f;
@@ -586,62 +693,63 @@ bool captureAndClassify() {
             mode_str = "Fault Test 15g";
         } else {
             // Realistic random weight with 0.1g resolution
-            if (strcmp(best_label, "apple") == 0)       weight_g = (float)random(1600, 2300) / 10.0f;
-            else if (strcmp(best_label, "orange") == 0) weight_g = (float)random(1400, 2000) / 10.0f;
-            else if (strcmp(best_label, "pear") == 0)   weight_g = (float)random(1800, 2700) / 10.0f;
-            else                                        weight_g = (float)random(1500, 2200) / 10.0f;
+            if (strcmp(winner_label, "apple") == 0)       weight_g = (float)random(1600, 2300) / 10.0f;
+            else if (strcmp(winner_label, "orange") == 0) weight_g = (float)random(1400, 2000) / 10.0f;
+            else if (strcmp(winner_label, "pear") == 0)   weight_g = (float)random(1800, 2700) / 10.0f;
+            else                                          weight_g = (float)random(1500, 2200) / 10.0f;
             mode_str = "Random Realistic";
         }
 
         unit_price = 2.00f;
-        if (strcmp(best_label, "apple") == 0)       unit_price = UNIT_PRICE_APPLE;
-        else if (strcmp(best_label, "orange") == 0) unit_price = UNIT_PRICE_ORANGE;
-        else if (strcmp(best_label, "pear") == 0)   unit_price = UNIT_PRICE_PEAR;
+        if (strcmp(winner_label, "apple") == 0)       unit_price = UNIT_PRICE_APPLE;
+        else if (strcmp(winner_label, "orange") == 0) unit_price = UNIT_PRICE_ORANGE;
+        else if (strcmp(winner_label, "pear") == 0)   unit_price = UNIT_PRICE_PEAR;
 
         total_price = (weight_g / 1000.0f) * unit_price;
         sanity_ok = (weight_g >= 50.0f && weight_g <= 600.0f);
     }
 
-    // 7. Update Live Telemetry for Web Dashboard
-    strncpy(g_telemetry.label, best_label, sizeof(g_telemetry.label) - 1);
-    g_telemetry.confidence = best_confidence;
-    g_telemetry.x = best_x;
-    g_telemetry.y = best_y;
+    // 8. Update Live Telemetry for Web Dashboard
+    strncpy(g_telemetry.label, winner_label, sizeof(g_telemetry.label) - 1);
+    g_telemetry.confidence = winner_avg_conf;
+    g_telemetry.x = winner_x;
+    g_telemetry.y = winner_y;
     g_telemetry.weight_g = weight_g;
     g_telemetry.unit_price = unit_price;
     g_telemetry.total_price = total_price;
     g_telemetry.sanity_ok = sanity_ok;
     g_telemetry.detected = detected_any;
-    g_telemetry.dsp_ms = result.timing.dsp;
-    g_telemetry.infer_ms = result.timing.classification;
-    g_telemetry.total_ms = t_total_cycle;
-    g_telemetry.fps = current_fps;
+    g_telemetry.votes = winner_votes;
+    g_telemetry.burst_total = BURST_SAMPLE_COUNT;
+    g_telemetry.dsp_ms = valid_frames ? (total_dsp_ms / valid_frames) : 0;
+    g_telemetry.infer_ms = valid_frames ? (total_infer_ms / valid_frames) : 0;
+    g_telemetry.total_ms = t_burst_total;
+    g_telemetry.fps = t_burst_total > 0 ? (1000.0f / (float)t_burst_total) : 0.0f;
 
-    // 8. Output Result Log to Serial Monitor
+    // 9. Output Result Summary to Serial Monitor
+    Serial.println("  -----------------------------------------------------");
     if (detected_any) {
-        Serial.println("\n-------------------------------------------------------");
-        Serial.printf("  [#%u] ITEM DETECTED:  >> %s (%.1f%%) << at [x:%u, y:%u]\n",
-                      g_inference_count, best_label, best_confidence * 100.0f, best_x, best_y);
+        Serial.printf("  >> BURST WINNER:   [%s] (%u/%u votes, %.0f%% consensus)\n",
+                      winner_label, winner_votes, BURST_SAMPLE_COUNT,
+                      ((float)winner_votes / BURST_SAMPLE_COUNT) * 100.0f);
+        Serial.printf("  Average Confidence: %.1f%%\n", winner_avg_conf * 100.0f);
         Serial.printf("  Simulated Mass:     %.1f g (%.3f kg) [%s]\n", weight_g, weight_g / 1000.0f, mode_str);
         Serial.printf("  Unit Price:         $%.2f / kg\n", unit_price);
         Serial.printf("  TOTAL CHARGE:       $%.2f\n", total_price);
-        Serial.printf("  Sanity Check:       %s\n", sanity_ok ? "PASSED (Valid fruit weight)" : "REJECTED (Weight too low / unstable)");
-        Serial.println("-------------------------------------------------------");
+        Serial.printf("  Sanity Check:       %s\n", sanity_ok ? "PASSED (Valid fruit weight)" : "REJECTED (Weight out of range)");
     } else {
-        Serial.printf("\n[#%u] DETECTED: No fruit detected (Empty scale / Below threshold)\n", g_inference_count);
+        Serial.println("  >> RESULT:          EMPTY SCALE (0/4 detections)");
     }
+    Serial.printf("  Burst Duration:     %u ms (avg infer: %u ms/frame)\n",
+                  t_burst_total, valid_frames ? (total_infer_ms / valid_frames) : 0);
+    Serial.println("=======================================================\n");
 
-    // Performance & Health Telemetry
-    Serial.printf("     Timing:  DSP: %d ms | Infer: %d ms | Total: %d ms (%.1f FPS)\n",
-                  result.timing.dsp, result.timing.classification, t_total_cycle, current_fps);
-    Serial.printf("     Memory:  Heap: %u KB free | PSRAM: %u KB free | Temp: %.1f C\n",
-                  ESP.getFreeHeap() / 1024, ESP.getFreePsram() / 1024, temperatureRead());
-
-    // 9. Forward Result to STM32 Master via UART (if connected)
+    // 10. Forward Result to STM32 Master via UART
     if (detected_any) {
         STM32_Serial.write(0xAA);
-        STM32_Serial.write(best_label[0]); // 'a'=apple, 'o'=orange, 'p'=pear
-        STM32_Serial.write((uint8_t)(best_confidence * 100.0f));
+        STM32_Serial.write(winner_label[0]); // 'a'=apple, 'o'=orange, 'p'=pear
+        STM32_Serial.write((uint8_t)(winner_avg_conf * 100.0f));
+        STM32_Serial.write(winner_votes); // Send consensus vote count
         STM32_Serial.write(0x55);
         delay(15);
         digitalWrite(STATUS_LED_PIN, HIGH);
@@ -680,18 +788,21 @@ void loop() {
         uint8_t byte = STM32_Serial.read();
         if (byte == 0xAA) {
             Serial.println("\n[UART EVENT] Received capture trigger (0xAA) from STM32 Master!");
-            captureAndClassify();
+            runBurstInference();
             return;
         }
     }
 
-    // In continuous mode, run inference repeatedly
+    // In continuous mode, run a burst periodically (every 2.5 seconds)
     if (g_continuous_mode) {
-        captureAndClassify();
-        delay(30); // Yield to FreeRTOS HTTP server and Wi-Fi stack
-    } else {
-        delay(50);
+        static uint32_t s_last_burst_time = 0;
+        if (millis() - s_last_burst_time >= 2500) {
+            s_last_burst_time = millis();
+            runBurstInference();
+        }
     }
+
+    delay(30); // Generous yield to FreeRTOS HTTP server and Wi-Fi stack
 }
 
 // ----------------------------------------------------------------------------
@@ -707,10 +818,10 @@ void handleSerialCommands() {
         } else if (ch == 'm' || ch == 'M') {
             g_continuous_mode = !g_continuous_mode;
             Serial.printf("[COMMAND] Mode switched to: %s\n",
-                          g_continuous_mode ? "CONTINUOUS INFERENCE" : "TRIGGERED MODE (Press Space/trigger)");
+                          g_continuous_mode ? "CONTINUOUS (Burst every 2.5s)" : "TRIGGERED MODE (Press Space/trigger for burst)");
         } else if (ch == ' ' && !g_continuous_mode) {
-            Serial.println("[COMMAND] Spacebar trigger: Running single inference...");
-            captureAndClassify();
+            Serial.println("[COMMAND] Spacebar trigger: Running burst inference...");
+            runBurstInference();
         } else if (ch == 'w' || ch == 'W') {
             if (g_weight_mode == MOCK_WEIGHT_RANDOM) g_weight_mode = MOCK_WEIGHT_FIXED_200G;
             else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) g_weight_mode = MOCK_WEIGHT_TOO_LIGHT;
@@ -719,6 +830,7 @@ void handleSerialCommands() {
             const char* str = (g_weight_mode == MOCK_WEIGHT_RANDOM) ? "RANDOM REALISTIC" :
                               (g_weight_mode == MOCK_WEIGHT_FIXED_200G) ? "FIXED 200.0g" : "FAULT TEST 15.0g (fails sanity check)";
             Serial.printf("[COMMAND] Simulated Weight Mode: %s\n", str);
+            runBurstInference();
         } else if (ch == 'b' || ch == 'B') {
             printBenchmarkReport();
         } else if (ch == '?') {
@@ -726,7 +838,7 @@ void handleSerialCommands() {
             Serial.println("  [f] Toggle High-Power Flashlight LED");
             Serial.println("  [m] Toggle Continuous vs. Triggered mode");
             Serial.println("  [w] Cycle Mock Weight Mode (Random -> Fixed 200g -> Fault 15g)");
-            Serial.println("  [Space] Trigger single inference (in Triggered mode)");
+            Serial.println("  [Space] Trigger 4-frame Burst Inference (in Triggered mode)");
             Serial.println("  [b] Print comprehensive Benchmark Performance Summary");
             Serial.println("  [?] Print this help menu\n");
         }
