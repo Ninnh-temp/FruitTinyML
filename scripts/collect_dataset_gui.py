@@ -37,15 +37,16 @@ class DatasetCollectorApp:
         self.custom_label = tk.StringVar()
         self.status_text = tk.StringVar(value="Ready. Connect to ESP32 Wi-Fi.")
         self.is_streaming = False
-        self.is_auto_capturing = False
+        self.is_auto_capturing = tk.BooleanVar(value=False)
         self.auto_interval_sec = tk.DoubleVar(value=1.5)
         self.capture_count = 0
         self.latest_image_bytes = None
 
-        # Lock for stream thread
+        # Thread signals
         self.stream_thread = None
         self.auto_thread = None
         self.stop_events = threading.Event()
+        self.stop_auto_event = threading.Event()
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         self.build_ui()
@@ -179,7 +180,10 @@ class DatasetCollectorApp:
         self.lbl_status.pack(side=tk.BOTTOM, fill=tk.X)
 
     def bind_shortcuts(self):
-        self.root.bind("<space>", lambda e: self.capture_manual())
+        def on_space(e):
+            if not isinstance(e.widget, (tk.Entry, ttk.Entry, tk.Spinbox)):
+                self.capture_manual()
+        self.root.bind("<space>", on_space)
 
     def rebuild_class_radios(self):
         for widget in self.class_buttons_frame.winfo_children():
@@ -220,6 +224,9 @@ class DatasetCollectorApp:
         else:
             self.is_streaming = False
             self.stop_events.set()
+            if self.is_auto_capturing.get():
+                self.is_auto_capturing.set(False)
+                self.stop_auto_event.set()
             self.btn_connect.config(text="▶ Start Live Preview", bg="#0284c7")
             self.status_text.set("Live preview stopped.")
 
@@ -251,7 +258,7 @@ class DatasetCollectorApp:
                         self.lbl_viewport.image = image_ref
 
                 self.root.after(0, update_view)
-                time.sleep(0.04)  # ~25 FPS max client throttle
+                time.sleep(0.06)  # ~16 FPS throttle (gentle on ESP32 camera driver & Wi-Fi)
 
             except Exception as e:
                 fail_count += 1
@@ -273,23 +280,27 @@ class DatasetCollectorApp:
         self.view_container.config(bg="#22c55e")
         self.root.after(100, lambda: self.view_container.config(bg=orig_bg))
 
-        # Run capture in background thread so GUI doesn't freeze
-        threading.Thread(target=self._save_capture_task, args=(label,), daemon=True).start()
+        # Grab in-memory preview frame so we don't open duplicate HTTP sockets
+        cached_frame = self.latest_image_bytes
 
-    def _save_capture_task(self, label):
+        # Run save in background thread so GUI doesn't freeze
+        threading.Thread(target=self._save_capture_task, args=(label, cached_frame), daemon=True).start()
+
+    def _save_capture_task(self, label, cached_bytes=None):
         class_dir = os.path.join(OUTPUT_DIR, label)
         os.makedirs(class_dir, exist_ok=True)
 
-        img_bytes = None
-        # If we have a fresh preview frame, use it or request a dedicated snapshot
-        try:
-            url = self.get_url("capture?t=" + str(int(time.time() * 1000)))
-            req = urllib.request.Request(url, headers={"User-Agent": "TinyFruitML-Collector/1.0"})
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
-                img_bytes = resp.read()
-        except Exception:
-            # Fall back to latest cached preview frame if direct fetch times out
-            img_bytes = self.latest_image_bytes
+        img_bytes = cached_bytes
+        # If preview stream is not running, fetch directly from ESP32
+        if not img_bytes:
+            try:
+                url = self.get_url("capture?t=" + str(int(time.time() * 1000)))
+                req = urllib.request.Request(url, headers={"User-Agent": "TinyFruitML-Collector/1.0"})
+                with urllib.request.urlopen(req, timeout=4.0) as resp:
+                    img_bytes = resp.read()
+            except Exception as e:
+                self.root.after(0, lambda: self.status_text.set(f"Capture error: {e}"))
+                return
 
         if not img_bytes:
             self.root.after(0, lambda: self.status_text.set("Error: Failed to capture image from ESP32."))
@@ -314,18 +325,36 @@ class DatasetCollectorApp:
         self.refresh_stats()
 
     def toggle_auto_capture(self):
-        if self.is_auto_capturing:
-            self.status_text.set(f"Auto-capture active: snapping every {self.auto_interval_sec.get()}s")
+        if self.is_auto_capturing.get():
+            # If preview is offline, start preview automatically
+            if not self.is_streaming:
+                self.toggle_stream()
+
+            self.stop_auto_event.clear()
+            try:
+                interval = float(self.auto_interval_sec.get())
+            except Exception:
+                interval = 1.5
+            self.status_text.set(f"Auto-capture ACTIVE: snapping every {interval:.1f}s")
             self.auto_thread = threading.Thread(target=self._auto_capture_loop, daemon=True)
             self.auto_thread.start()
         else:
+            self.stop_auto_event.set()
             self.status_text.set("Auto-capture disabled.")
 
     def _auto_capture_loop(self):
-        while self.is_auto_capturing and not self.stop_events.is_set():
+        while self.is_auto_capturing.get() and not self.stop_auto_event.is_set():
             self.capture_manual()
-            interval = max(0.5, self.auto_interval_sec.get())
-            time.sleep(interval)
+            try:
+                interval = max(0.5, float(self.auto_interval_sec.get()))
+            except Exception:
+                interval = 1.5
+
+            # Sleep in 100ms slices so stopping is immediate
+            elapsed = 0.0
+            while elapsed < interval and self.is_auto_capturing.get() and not self.stop_auto_event.is_set():
+                time.sleep(0.1)
+                elapsed += 0.1
 
     def toggle_flash(self):
         threading.Thread(target=self._flash_task, daemon=True).start()

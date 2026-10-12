@@ -59,10 +59,10 @@
 #define STM32_BAUD    115200
 HardwareSerial STM32_Serial(2);
 
-// --- Mock / Simulated STM32 Metrology & Pricing ---
-#define UNIT_PRICE_APPLE    2.50f  // $2.50 / kg
-#define UNIT_PRICE_ORANGE   3.00f  // $3.00 / kg
-#define UNIT_PRICE_PEAR     3.80f  // $3.80 / kg
+// --- Mock / Simulated STM32 Metrology & Pricing (VND) ---
+#define UNIT_PRICE_APPLE    60000.0f  // 60,000 VND / kg
+#define UNIT_PRICE_ORANGE   40000.0f  // 40,000 VND / kg
+#define UNIT_PRICE_PEAR     70000.0f  // 70,000 VND / kg
 
 enum MockWeightMode {
     MOCK_WEIGHT_RANDOM,      // Realistic random weight per detected fruit
@@ -87,8 +87,9 @@ struct LiveScaleTelemetry {
     float fps;
     uint8_t votes;
     uint8_t burst_total;
+    bool stm32_live;
 };
-static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f, 0, 4};
+static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f, 0, 4, false};
 
 // --- Burst Voting Configuration (Temporal Consensus Ensemble) ---
 #define BURST_SAMPLE_COUNT     4    // Frames captured per inference event
@@ -113,7 +114,8 @@ static uint32_t g_max_infer_time_ms = 0;
 
 // Function Prototypes
 bool initCamera();
-bool runBurstInference();
+bool runBurstInference(float override_weight_g = -1.0f);
+void processStm32Uart();
 static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr);
 void startWebServer();
 void handleSerialCommands();
@@ -124,143 +126,1062 @@ void printBenchmarkReport();
 // ----------------------------------------------------------------------------
 static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
-<html>
+<html lang="vi">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Edge AI Smart Scale</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Cân Thông Minh AI - Edge Retail Scale</title>
   <style>
-    :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --accent: #38bdf8; --green: #22c55e; --red: #ef4444; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 16px; }
-    .container { max-width: 760px; margin: 0 auto; }
-    h1 { text-align: center; color: var(--accent); margin-bottom: 4px; font-size: 1.5rem; }
-    p.sub { text-align: center; color: #94a3b8; margin-top: 0; margin-bottom: 16px; font-size: 0.85rem; }
-    .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
-    .viewport-wrap { position: relative; width: 100%; border-radius: 8px; overflow: hidden; background: #000; text-align: center; min-height: 240px; }
-    #cam-view { width: 100%; max-height: 480px; object-fit: contain; display: block; }
-    .hud-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 14px; }
-    .hud-box { background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; text-align: center; }
-    .hud-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
-    .hud-val { font-size: 1.15rem; font-weight: bold; margin-top: 4px; }
-    .badge-fruit { color: var(--green); }
-    .badge-empty { color: #64748b; }
-    .badge-pass { color: var(--green); }
-    .badge-fail { color: var(--red); }
-    .btn-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
-    button { flex: 1; padding: 12px; font-size: 0.95rem; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; min-width: 130px; transition: 0.15s; }
-    .btn-flash { background: #eab308; color: #0f172a; }
-    .btn-weight { background: #8b5cf6; color: white; }
-    .btn-mode { background: #3b82f6; color: white; }
-    button:active { transform: scale(0.97); }
-    .telemetry-row { font-size: 0.8rem; color: #94a3b8; text-align: center; margin-top: 12px; }
+    :root {
+      --bg: #090d14;
+      --panel: #111722;
+      --panel-tint: #161f2e;
+      --subtle: #1c2738;
+      --text: #f8fafc;
+      --text-muted: #8b99ad;
+      --text-dim: #4b586d;
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.2);
+      --green: #22c55e;
+      --green-glow: rgba(34, 197, 94, 0.2);
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --mono: ui-monospace, "SF Mono", "Cascadia Code", "Courier New", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 14px;
+    }
+
+    .cockpit {
+      width: 100%;
+      max-width: 1060px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 2px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .brand-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .brand-badge {
+      font-size: 0.65rem;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      padding: 2px 7px;
+      border-radius: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .header-pills {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: var(--panel);
+      color: var(--text-muted);
+    }
+    .conn-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 6px var(--green);
+    }
+    .pill-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .pill-btn:hover { background: var(--panel-tint); }
+    .pill-btn.active {
+      background: rgba(56, 189, 248, 0.15);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .demo-toggle-label {
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      user-select: none;
+    }
+    .demo-toggle-label input { cursor: pointer; accent-color: var(--accent); }
+
+    .cockpit-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 1fr;
+      gap: 16px;
+      align-items: stretch;
+    }
+    @media (max-width: 820px) {
+      .cockpit-grid { grid-template-columns: 1fr; gap: 14px; }
+    }
+
+    .monitor-col {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .viewfinder {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      background: #020408;
+      border-radius: 14px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+    #cam-feed {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    
+    .bracket {
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      border: 2px solid rgba(56, 189, 248, 0.6);
+      pointer-events: none;
+    }
+    .br-tl { top: 12px; left: 12px; border-right: none; border-bottom: none; }
+    .br-tr { top: 12px; right: 12px; border-left: none; border-bottom: none; }
+    .br-bl { bottom: 12px; left: 12px; border-right: none; border-top: none; }
+    .br-br { bottom: 12px; right: 12px; border-left: none; border-top: none; }
+
+    .shutter-flash {
+      position: absolute;
+      inset: 0;
+      background: white;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease-out;
+    }
+    .shutter-flash.active { opacity: 0.85; transition: opacity 0.03s ease-in; }
+
+    .hud-top {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      right: 10px;
+      display: flex;
+      justify-content: space-between;
+      pointer-events: none;
+    }
+    .hud-tag {
+      background: rgba(9, 13, 20, 0.75);
+      backdrop-filter: blur(8px);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      font-family: var(--mono);
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+    .hud-bottom {
+      position: absolute;
+      bottom: 10px;
+      left: 10px;
+      right: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      pointer-events: none;
+    }
+    .live-target-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(9, 13, 20, 0.85);
+      backdrop-filter: blur(10px);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .action-strip {
+      display: grid;
+      grid-template-columns: 2fr 1fr 1fr;
+      gap: 8px;
+    }
+    .act-btn {
+      padding: 12px 10px;
+      border-radius: 10px;
+      border: none;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 0.86rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      user-select: none;
+    }
+    .act-btn:hover { background: var(--panel-tint); transform: translateY(-1px); }
+    .act-btn:active { transform: translateY(1px); }
+    .act-btn.primary {
+      background: linear-gradient(135deg, #0284c7, #0369a1);
+      color: white;
+      box-shadow: 0 4px 12px rgba(2, 132, 199, 0.35);
+    }
+    .act-btn.primary:hover { background: linear-gradient(135deg, #0369a1, #0284c7); }
+    .act-btn.flash-active {
+      background: rgba(245, 158, 11, 0.2);
+      color: #fde68a;
+    }
+
+    .console-col {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      justify-content: space-between;
+    }
+
+    .metrology-block {
+      background: var(--panel);
+      border-radius: 14px;
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .metrology-row-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+    .metrology-title {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      font-weight: 700;
+      color: var(--text-dim);
+    }
+    .mass-hero-wrap {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .mass-val {
+      font-family: var(--mono);
+      font-size: 3.4rem;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -1.5px;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+    }
+    .mass-unit {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+    .mass-kg-sub {
+      font-family: var(--mono);
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-align: right;
+    }
+
+    .price-line {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .price-total-wrap {
+      display: flex;
+      flex-direction: column;
+    }
+    .price-total-val {
+      font-family: var(--mono);
+      font-size: 2.3rem;
+      font-weight: 800;
+      color: var(--accent);
+      line-height: 1;
+    }
+    .price-rate-wrap {
+      text-align: right;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+    .edit-price-inline {
+      color: var(--accent);
+      font-size: 0.76rem;
+      cursor: pointer;
+      text-decoration: underline;
+      margin-left: 4px;
+    }
+
+    .price-editor-tray {
+      display: none;
+      background: #141b26;
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      border-radius: 12px;
+      padding: 12px 14px;
+      flex-direction: column;
+      gap: 10px;
+      animation: fadeIn 0.2s ease;
+    }
+    .price-editor-tray.open { display: flex; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .price-tray-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+    }
+    .unit-switch-group {
+      display: flex;
+      gap: 4px;
+      background: rgba(0, 0, 0, 0.3);
+      padding: 2px;
+      border-radius: 6px;
+    }
+    .unit-opt-btn {
+      padding: 3px 8px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      border: none;
+      background: none;
+      color: var(--text-dim);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .unit-opt-btn.selected {
+      background: var(--accent);
+      color: #0b0f17;
+    }
+    .price-inputs-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    @media (max-width: 480px) {
+      .price-inputs-grid { grid-template-columns: 1fr; }
+    }
+    .price-card {
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 8px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .price-card-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .price-stepper {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .step-btn {
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: var(--panel);
+      color: var(--text);
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .step-btn:hover { background: var(--panel-tint); }
+    .price-input-box {
+      flex: 1;
+      width: 100%;
+      min-width: 50px;
+      background: #090d14;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 0.88rem;
+      font-weight: 700;
+      padding: 4px 6px;
+      text-align: center;
+    }
+    .price-tray-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+    }
+    .reset-link {
+      color: var(--text-muted);
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .reset-link:hover { color: var(--accent); }
+
+    .fruit-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--panel);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    .fruit-info-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .fruit-icon { font-size: 1.5rem; line-height: 1; }
+    .fruit-name { font-size: 1rem; font-weight: 700; }
+    .fruit-consensus-txt { font-size: 0.74rem; color: var(--text-muted); }
+    .sanity-tag {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 6px;
+    }
+    .sanity-pass { background: rgba(34, 197, 94, 0.15); color: var(--green); }
+    .sanity-idle { background: rgba(255, 255, 255, 0.05); color: var(--text-dim); }
+    .sanity-fail { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+
+    .telemetry-block {
+      background: var(--panel);
+      border-radius: 14px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .telem-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .telem-title {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      color: var(--text-dim);
+    }
+    .telem-pulse {
+      font-size: 0.7rem;
+      font-family: var(--mono);
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .telem-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    @media (max-width: 480px) {
+      .telem-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .telem-cell {
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 8px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      transition: background 0.3s ease;
+    }
+    .telem-cell.flash-update {
+      background: rgba(56, 189, 248, 0.15);
+    }
+    .telem-k {
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .telem-v {
+      font-family: var(--mono);
+      font-size: 0.88rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .consensus-bar-wrap {
+      width: 100%;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 2px;
+    }
+    .consensus-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--green));
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+
+    footer {
+      text-align: center;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      padding: 6px 0;
+    }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>Edge AI Smart Retail Scale</h1>
-    <p class="sub">TinyML Vision Coprocessor & Simulated Metrology Dashboard</p>
 
-    <div class="card">
-      <div class="viewport-wrap">
-        <img id="cam-view" src="/capture" alt="Live Camera View">
+  <div class="cockpit">
+    <header>
+      <div class="brand-title">
+        <span>Cân Thông Minh AI</span>
+        <span class="brand-badge">ESP32 + STM32</span>
       </div>
-      <div class="btn-row">
-        <button class="btn-flash" onclick="toggleFlash()">💡 Toggle Flashlight</button>
-        <button class="btn-weight" onclick="cycleWeight()">⚖️ Cycle Mock Weight</button>
-        <button class="btn-mode" onclick="triggerInference()">📸 Trigger Burst AI</button>
+      <div class="header-pills">
+        <button class="pill-btn" id="btn-price-menu" onclick="togglePriceMenu()">
+          <span>🏷️</span>
+          <span>Bảng Giá (VND)</span>
+        </button>
+        <div class="status-pill">
+          <span class="conn-dot" id="conn-dot"></span>
+          <span id="conn-status">SoftAP Live</span>
+        </div>
+        <label class="demo-toggle-label">
+          <input type="checkbox" id="demo-check" onchange="toggleDemo(this.checked)">
+          <span>Mô phỏng</span>
+        </label>
+      </div>
+    </header>
+
+    <div class="cockpit-grid">
+      <div class="monitor-col">
+        <div class="viewfinder" onclick="triggerInference()">
+          <img id="cam-feed" src="/capture" alt="Camera Stream" onerror="handleImageError()">
+          <div class="shutter-flash" id="shutter-fx"></div>
+
+          <div class="bracket br-tl"></div>
+          <div class="bracket br-tr"></div>
+          <div class="bracket br-bl"></div>
+          <div class="bracket br-br"></div>
+
+          <div class="hud-top">
+            <div class="hud-tag">OV2640 • 320x240</div>
+            <div class="hud-tag" id="cam-fps-hud">-- FPS</div>
+          </div>
+
+          <div class="hud-bottom">
+            <div class="live-target-badge">
+              <span id="target-icon">⚖️</span>
+              <span id="target-name">Đang quét đĩa cân...</span>
+            </div>
+            <div class="hud-tag" id="target-conf">-- %</div>
+          </div>
+        </div>
+
+        <div class="action-strip">
+          <button class="act-btn primary" onclick="triggerInference()">
+            <span>⚡</span>
+            <span>Quét Nhận Diện (AI)</span>
+          </button>
+          <button class="act-btn" id="btn-flash" onclick="toggleFlash()">
+            <span>💡</span>
+            <span id="lbl-flash">Đèn Flash</span>
+          </button>
+          <button class="act-btn" onclick="cycleWeight()">
+            <span>⚖️</span>
+            <span>Đổi Khối Lượng</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="console-col">
+        <div class="metrology-block">
+          <div class="metrology-row-top">
+            <span class="metrology-title">Khối lượng cân (Mass)</span>
+            <span id="val-source-pill" style="font-size:0.7rem; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,0.08); color:#94a3b8; font-weight:600;">Mô phỏng</span>
+            <span class="mass-kg-sub" id="val-mass-kg">0,000 kg</span>
+          </div>
+          <div class="mass-hero-wrap">
+            <span class="mass-val" id="val-mass">0.0</span>
+            <span class="mass-unit">g</span>
+          </div>
+          
+          <div class="price-line">
+            <div class="price-total-wrap">
+              <span class="metrology-title">Thành tiền (VND)</span>
+              <span class="price-total-val" id="val-total">0 ₫</span>
+            </div>
+            <div class="price-rate-wrap">
+              <div id="val-unit-rate">
+                Đơn giá: 0 ₫ / kg
+                <span class="edit-price-inline" onclick="togglePriceMenu()">[Sửa]</span>
+              </div>
+              <div style="font-size:0.75rem; color:var(--text-dim);" id="val-tare-state">Đã trừ bì (Tare 0g)</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="price-editor-tray" id="price-tray">
+          <div class="price-tray-header">
+            <span>Cài Đặt Đơn Giá Nhanh (VND)</span>
+            <div class="unit-switch-group">
+              <button class="unit-opt-btn selected" id="unit-kg-btn" onclick="setPriceUnit('kg')">/ kg</button>
+              <button class="unit-opt-btn" id="unit-100g-btn" onclick="setPriceUnit('100g')">/ 100g</button>
+              <button class="unit-opt-btn" id="unit-g-btn" onclick="setPriceUnit('g')">/ g</button>
+            </div>
+          </div>
+
+          <div class="price-inputs-grid">
+            <div class="price-card">
+              <span class="price-card-label">🍎 Táo (Apple)</span>
+              <div class="price-stepper">
+                <button class="step-btn" onclick="stepPrice('apple', -1000)">−</button>
+                <input type="number" step="100" min="0" class="price-input-box" id="inp-price-apple" oninput="onCustomPriceChange('apple', this.value)">
+                <button class="step-btn" onclick="stepPrice('apple', 1000)">+</button>
+              </div>
+            </div>
+
+            <div class="price-card">
+              <span class="price-card-label">🍊 Cam (Orange)</span>
+              <div class="price-stepper">
+                <button class="step-btn" onclick="stepPrice('orange', -1000)">−</button>
+                <input type="number" step="100" min="0" class="price-input-box" id="inp-price-orange" oninput="onCustomPriceChange('orange', this.value)">
+                <button class="step-btn" onclick="stepPrice('orange', 1000)">+</button>
+              </div>
+            </div>
+
+            <div class="price-card">
+              <span class="price-card-label">🍐 Lê (Pear)</span>
+              <div class="price-stepper">
+                <button class="step-btn" onclick="stepPrice('pear', -1000)">−</button>
+                <input type="number" step="100" min="0" class="price-input-box" id="inp-price-pear" oninput="onCustomPriceChange('pear', this.value)">
+                <button class="step-btn" onclick="stepPrice('pear', 1000)">+</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="price-tray-footer">
+            <span>Tự động cập nhật thành tiền tức thì</span>
+            <span class="reset-link" onclick="resetDefaultPrices()">Giá mặc định</span>
+          </div>
+        </div>
+
+        <div class="fruit-line">
+          <div class="fruit-info-left">
+            <span class="fruit-icon" id="fruit-emoji">⚖️</span>
+            <div>
+              <div class="fruit-name" id="fruit-title">Cân trống (Empty)</div>
+              <div class="fruit-consensus-txt" id="fruit-sub">Đĩa cân trống • Sẵn sàng đặt quả</div>
+              <div class="consensus-bar-wrap">
+                <div class="consensus-bar-fill" id="consensus-bar"></div>
+              </div>
+            </div>
+          </div>
+          <span class="sanity-tag sanity-idle" id="sanity-pill">ĐÃ BÌ (TARE)</span>
+        </div>
+
+        <div class="telemetry-block">
+          <div class="telem-header">
+            <span class="telem-title">Thông số phần cứng & TinyML AI</span>
+            <span class="telem-pulse" id="telem-live-pill">● HOẠT ĐỘNG</span>
+          </div>
+
+          <div class="telem-grid">
+            <div class="telem-cell" id="c-infer">
+              <span class="telem-k">Độ trễ AI</span>
+              <span class="telem-v" id="t-infer">-- ms</span>
+            </div>
+            <div class="telem-cell" id="c-dsp">
+              <span class="telem-k">Xử lý ảnh DSP</span>
+              <span class="telem-v" id="t-dsp">-- ms</span>
+            </div>
+            <div class="telem-cell" id="c-fps">
+              <span class="telem-k">Tốc độ khung</span>
+              <span class="telem-v" id="t-fps">-- FPS</span>
+            </div>
+            <div class="telem-cell" id="c-consensus">
+              <span class="telem-k">Đồng thuận mẫu</span>
+              <span class="telem-v" id="t-votes">--</span>
+            </div>
+            <div class="telem-cell" id="c-temp">
+              <span class="telem-k">Nhiệt độ chip</span>
+              <span class="telem-v" id="t-temp">-- °C</span>
+            </div>
+            <div class="telem-cell" id="c-psram">
+              <span class="telem-k">PSRAM trống</span>
+              <span class="telem-v" id="t-psram">-- KB</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div class="card">
-      <h3 style="margin-top:0; font-size: 1.1rem; color: var(--accent);">Real-Time Checkout Slip</h3>
-      <div class="hud-grid">
-        <div class="hud-box">
-          <div class="hud-label">Detected Fruit</div>
-          <div class="hud-val badge-fruit" id="val-item">Waiting...</div>
-          <div style="font-size:0.75rem; color:#94a3b8; margin-top:4px;" id="val-votes">Ready</div>
-        </div>
-        <div class="hud-box">
-          <div class="hud-label">Confidence</div>
-          <div class="hud-val" id="val-conf">-- %</div>
-        </div>
-        <div class="hud-box">
-          <div class="hud-label">Mass (Grams)</div>
-          <div class="hud-val" id="val-mass">-- g</div>
-        </div>
-        <div class="hud-box">
-          <div class="hud-label">Unit Price</div>
-          <div class="hud-val" id="val-unit">$-- / kg</div>
-        </div>
-        <div class="hud-box" style="border: 1px solid var(--accent);">
-          <div class="hud-label">Total Charge</div>
-          <div class="hud-val" style="color:var(--accent);" id="val-total">$--</div>
-        </div>
-        <div class="hud-box">
-          <div class="hud-label">Sanity Check</div>
-          <div class="hud-val badge-pass" id="val-sanity">OK</div>
-        </div>
-      </div>
-      <div class="telemetry-row" id="val-telemetry">
-        Timing: DSP -- ms | Infer -- ms | Total -- ms (-- FPS) | Die Temp: -- &deg;C
-      </div>
-    </div>
+    <footer>
+      Hệ Thống Cân Tính Tiền Thông Minh Edge AI • ESP32-CAM (FOMO INT8) & STM32 (HX711)
+    </footer>
   </div>
 
   <script>
+    let isLiveConnected = false;
+    let isDemoMode = false;
+    let flashActive = false;
+    let demoIndex = 0;
+    let priceUnit = 'kg';
+
+    const DEFAULT_PRICES = {
+      apple: 60000,
+      orange: 40000,
+      pear: 70000
+    };
+
+    let customPrices = { ...DEFAULT_PRICES };
+    try {
+      const saved = localStorage.getItem('scale_prices_vnd_kg');
+      if (saved) customPrices = JSON.parse(saved);
+      const savedUnit = localStorage.getItem('scale_price_vnd_unit');
+      if (savedUnit) priceUnit = savedUnit;
+    } catch (e) {}
+
+    const FRUITS = {
+      apple: { name: "Táo (Apple)", emoji: "🍎" },
+      orange: { name: "Cam (Orange)", emoji: "🍊" },
+      pear: { name: "Lê (Pear)", emoji: "🍐" },
+      none: { name: "Cân trống", emoji: "⚖️" }
+    };
+
+    const DEMO_SAMPLES = [
+      { label: "apple", confidence: 0.945, weight: 218.4, votes: 4, dsp_ms: 8, infer_ms: 42, temp: 48.2, psram_kb: 3840, heap_kb: 172 },
+      { label: "orange", confidence: 0.892, weight: 184.2, votes: 4, dsp_ms: 9, infer_ms: 41, temp: 48.6, psram_kb: 3840, heap_kb: 171 },
+      { label: "pear", confidence: 0.961, weight: 235.8, votes: 4, dsp_ms: 8, infer_ms: 44, temp: 49.1, psram_kb: 3840, heap_kb: 170 },
+      { label: "none", confidence: 0.000, weight: 0.0, votes: 0, dsp_ms: 8, infer_ms: 39, temp: 47.9, psram_kb: 3840, heap_kb: 174 }
+    ];
+
+    let currentTelemetry = DEMO_SAMPLES[demoIndex];
+
+    function formatVND(val) {
+      return Math.round(val).toLocaleString('vi-VN') + ' ₫';
+    }
+
+    function syncPriceInputs() {
+      ['apple', 'orange', 'pear'].forEach(k => {
+        const inp = document.getElementById('inp-price-' + k);
+        if (inp) {
+          const displayedPrice = convertRateForUnit(customPrices[k], priceUnit);
+          inp.value = Math.round(displayedPrice);
+        }
+      });
+      ['kg', '100g', 'g'].forEach(u => {
+        const btn = document.getElementById('unit-' + u + '-btn');
+        if (btn) btn.classList.toggle('selected', u === priceUnit);
+      });
+    }
+
+    function convertRateForUnit(pricePerKg, unit) {
+      if (unit === 'g') return pricePerKg / 1000.0;
+      if (unit === '100g') return pricePerKg / 10.0;
+      return pricePerKg;
+    }
+
+    function convertToPricePerKg(val, unit) {
+      if (unit === 'g') return val * 1000.0;
+      if (unit === '100g') return val * 10.0;
+      return val;
+    }
+
+    function togglePriceMenu() {
+      const tray = document.getElementById('price-tray');
+      const btn = document.getElementById('btn-price-menu');
+      const isOpen = tray.classList.toggle('open');
+      btn.classList.toggle('active', isOpen);
+      if (isOpen) syncPriceInputs();
+    }
+
+    function setPriceUnit(u) {
+      priceUnit = u;
+      try { localStorage.setItem('scale_price_vnd_unit', u); } catch(e){}
+      syncPriceInputs();
+      renderData(currentTelemetry);
+    }
+
+    function onCustomPriceChange(fruit, val) {
+      const num = parseFloat(val);
+      if (!isNaN(num) && num >= 0) {
+        customPrices[fruit] = convertToPricePerKg(num, priceUnit);
+        savePrices();
+        renderData(currentTelemetry);
+      }
+    }
+
+    function stepPrice(fruit, delta) {
+      const currentRate = convertRateForUnit(customPrices[fruit], priceUnit);
+      let stepDelta = delta;
+      if (priceUnit === '100g') stepDelta = delta / 10.0;
+      if (priceUnit === 'g') stepDelta = Math.max(1, delta / 1000.0);
+      
+      const newRate = Math.max(0, currentRate + stepDelta);
+      customPrices[fruit] = convertToPricePerKg(newRate, priceUnit);
+      savePrices();
+      syncPriceInputs();
+      renderData(currentTelemetry);
+    }
+
+    function resetDefaultPrices() {
+      customPrices = { ...DEFAULT_PRICES };
+      savePrices();
+      syncPriceInputs();
+      renderData(currentTelemetry);
+    }
+
+    function savePrices() {
+      try { localStorage.setItem('scale_prices_vnd_kg', JSON.stringify(customPrices)); } catch(e){}
+    }
+
+    function createSvgView(label) {
+      const colors = { apple: "#ef4444", orange: "#f97316", pear: "#84cc16", none: "#334155" };
+      const c = colors[label] || "#334155";
+      const icon = FRUITS[label] ? FRUITS[label].emoji : "⚖️";
+      return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" fill="%23020408"/><circle cx="160" cy="120" r="52" fill="${encodeURIComponent(c)}" opacity="0.3"/><circle cx="160" cy="120" r="38" fill="${encodeURIComponent(c)}" opacity="0.75"/><text x="160" y="132" font-size="38" text-anchor="middle" font-family="sans-serif">${encodeURIComponent(icon)}</text></svg>`;
+    }
+
     function updateFrame() {
-      const view = document.getElementById('cam-view');
+      if (isDemoMode) return;
+      const view = document.getElementById('cam-feed');
       const img = new Image();
       img.onload = () => {
         view.src = img.src;
+        setConnectionState(true);
         setTimeout(updateFrame, 80);
       };
       img.onerror = () => {
-        setTimeout(updateFrame, 200);
+        handleImageError();
+        setTimeout(updateFrame, 1500);
       };
       img.src = '/capture?t=' + Date.now();
     }
 
-    function pollTelemetry() {
-      fetch('/status').then(r => r.json()).then(d => {
-        const itemEl = document.getElementById('val-item');
-        const votesEl = document.getElementById('val-votes');
-        if (d.detected) {
-          itemEl.innerText = d.label.toUpperCase();
-          itemEl.className = 'hud-val badge-fruit';
-          votesEl.innerText = d.votes + '/' + d.burst_total + ' frames (' + Math.round((d.votes / d.burst_total) * 100) + '% consensus)';
-        } else {
-          itemEl.innerText = 'EMPTY SCALE';
-          itemEl.className = 'hud-val badge-empty';
-          votesEl.innerText = '0/' + d.burst_total + ' (No Fruit)';
-        }
-        document.getElementById('val-conf').innerText = d.confidence > 0 ? (d.confidence * 100).toFixed(1) + '%' : '--';
-        document.getElementById('val-mass').innerText = d.weight > 0 ? d.weight.toFixed(1) + ' g' : '0.0 g';
-        document.getElementById('val-unit').innerText = d.unit_price > 0 ? '$' + d.unit_price.toFixed(2) + ' / kg' : '--';
-        document.getElementById('val-total').innerText = d.total_price > 0 ? '$' + d.total_price.toFixed(2) : '$0.00';
-        
-        const sanityEl = document.getElementById('val-sanity');
-        if (!d.detected) {
-          sanityEl.innerText = 'IDLE';
-          sanityEl.className = 'hud-val badge-empty';
-        } else if (d.sanity_ok) {
-          sanityEl.innerText = 'PASSED';
-          sanityEl.className = 'hud-val badge-pass';
-        } else {
-          sanityEl.innerText = 'REJECTED';
-          sanityEl.className = 'hud-val badge-fail';
-        }
-
-        document.getElementById('val-telemetry').innerHTML =
-          'Timing: DSP ' + d.dsp_ms + ' ms | Infer ' + d.infer_ms + ' ms | Total ' + d.total_ms + ' ms (' + d.fps.toFixed(1) + ' FPS) | Die Temp: ' + d.temp.toFixed(1) + ' &deg;C | PSRAM Free: ' + d.psram_kb + ' KB';
-      }).catch(e => console.log(e));
+    function handleImageError() {
+      if (!isDemoMode) {
+        setConnectionState(false);
+        renderData(DEMO_SAMPLES[demoIndex]);
+      }
     }
 
-    function toggleFlash() { fetch('/flash').catch(e => console.log(e)); }
-    function cycleWeight() { fetch('/cycle_weight').then(pollTelemetry).catch(e => console.log(e)); }
-    function triggerInference() { fetch('/trigger').catch(e => console.log(e)); }
+    function poll() {
+      if (isDemoMode) {
+        renderData(DEMO_SAMPLES[demoIndex]);
+        return;
+      }
+      fetch('/status')
+        .then(r => r.json())
+        .then(d => { setConnectionState(true); renderData(d); })
+        .catch(() => { setConnectionState(false); renderData(DEMO_SAMPLES[demoIndex]); });
+    }
 
-    setInterval(pollTelemetry, 300);
-    pollTelemetry();
+    function renderData(d) {
+      currentTelemetry = d;
+      const label = (d.label || "none").toLowerCase();
+      const meta = FRUITS[label] || FRUITS["none"];
+      const isFruit = (label !== "none" && label !== "empty_scale");
+      const massG = d.weight > 0 ? d.weight : 0.0;
+
+      const basePricePerKg = isFruit ? (customPrices[label] || DEFAULT_PRICES[label] || 60000) : 0;
+      const displayRate = convertRateForUnit(basePricePerKg, priceUnit);
+      const totalDue = (massG / 1000.0) * basePricePerKg;
+
+      document.getElementById('val-mass').innerText = massG.toFixed(1);
+      document.getElementById('val-mass-kg').innerText = (massG / 1000.0).toFixed(3).replace('.', ',') + " kg";
+      document.getElementById('val-total').innerText = totalDue > 0 ? formatVND(totalDue) : "0 ₫";
+      
+      const srcPill = document.getElementById('val-source-pill');
+      if (srcPill) {
+        if (d.stm32_live) {
+          srcPill.innerText = "STM32 HX711";
+          srcPill.style.color = "var(--green)";
+          srcPill.style.background = "rgba(34, 197, 94, 0.18)";
+        } else {
+          srcPill.innerText = "Mô phỏng";
+          srcPill.style.color = "#94a3b8";
+          srcPill.style.background = "rgba(255, 255, 255, 0.08)";
+        }
+      }
+
+      const rateSuffix = priceUnit === 'g' ? '/ g' : (priceUnit === '100g' ? '/ 100g' : '/ kg');
+      document.getElementById('val-unit-rate').innerHTML = 
+        `Đơn giá: ${formatVND(displayRate)} ${rateSuffix} <span class="edit-price-inline" onclick="togglePriceMenu()">[Sửa]</span>`;
+      document.getElementById('val-tare-state').innerText = isFruit ? "Cảm biến khối lượng đang đo" : "Đã trừ bì (Tare 0g)";
+
+      document.getElementById('target-icon').innerText = meta.emoji;
+      document.getElementById('target-name').innerText = isFruit ? meta.name : "Đang quét đĩa cân...";
+      document.getElementById('target-conf').innerText = isFruit ? (d.confidence * 100).toFixed(0) + "%" : "--";
+      const totalTime = (d.dsp_ms || 8) + (d.infer_ms || 42);
+      const fps = totalTime > 0 ? (1000 / totalTime).toFixed(0) : "20";
+      document.getElementById('cam-fps-hud').innerText = fps + " FPS";
+
+      document.getElementById('fruit-emoji').innerText = meta.emoji;
+      document.getElementById('fruit-title').innerText = isFruit ? meta.name : "Cân trống";
+      const votes = d.votes || (isFruit ? 4 : 0);
+      const burstTotal = d.burst_total || 4;
+      const pct = Math.round((votes / burstTotal) * 100);
+      document.getElementById('fruit-sub').innerText = isFruit 
+        ? `${votes}/${burstTotal} mẫu đồng thuận (${pct}%)`
+        : "Đĩa cân trống • Sẵn sàng đặt quả";
+      document.getElementById('consensus-bar').style.width = isFruit ? pct + "%" : "0%";
+
+      const sanityPill = document.getElementById('sanity-pill');
+      if (!isFruit) {
+        sanityPill.className = "sanity-tag sanity-idle";
+        sanityPill.innerText = "ĐÃ BÌ (TARE)";
+      } else if (massG >= 50 && massG <= 600) {
+        sanityPill.className = "sanity-tag sanity-pass";
+        sanityPill.innerText = "HỢP LỆ";
+      } else {
+        sanityPill.className = "sanity-tag sanity-fail";
+        sanityPill.innerText = "SAI PHẠM VI";
+      }
+
+      document.getElementById('t-infer').innerText = (d.infer_ms || 42) + " ms";
+      document.getElementById('t-dsp').innerText = (d.dsp_ms || 8) + " ms";
+      document.getElementById('t-fps').innerText = fps + " FPS";
+      document.getElementById('t-votes').innerText = `${votes}/${burstTotal} (${pct}%)`;
+      document.getElementById('t-temp').innerText = (d.temp ? d.temp.toFixed(1) : "48.2") + " °C";
+      document.getElementById('t-psram').innerText = (d.psram_kb || 3840) + " KB";
+
+      if (isDemoMode) {
+        document.getElementById('cam-feed').src = createSvgView(label);
+      }
+    }
+
+    function setConnectionState(connected) {
+      isLiveConnected = connected;
+      const dot = document.getElementById('conn-dot');
+      const text = document.getElementById('conn-status');
+      if (connected) {
+        dot.style.background = "var(--green)";
+        dot.style.boxShadow = "0 0 6px var(--green)";
+        text.innerText = "SoftAP Live";
+        isDemoMode = false;
+        document.getElementById('demo-check').checked = false;
+      } else {
+        dot.style.background = "var(--amber)";
+        dot.style.boxShadow = "0 0 6px var(--amber)";
+        text.innerText = "Mô phỏng";
+      }
+    }
+
+    function toggleDemo(enabled) {
+      isDemoMode = enabled;
+      if (enabled) {
+        renderData(DEMO_SAMPLES[demoIndex]);
+      } else {
+        updateFrame();
+        poll();
+      }
+    }
+
+    function triggerInference() {
+      const fx = document.getElementById('shutter-fx');
+      fx.classList.add('active');
+      setTimeout(() => fx.classList.remove('active'), 120);
+
+      const cells = document.querySelectorAll('.telem-cell');
+      cells.forEach(c => c.classList.add('flash-update'));
+      setTimeout(() => cells.forEach(c => c.classList.remove('flash-update')), 350);
+
+      if (isDemoMode) {
+        demoIndex = (demoIndex + 1) % DEMO_SAMPLES.length;
+        renderData(DEMO_SAMPLES[demoIndex]);
+      } else {
+        fetch('/trigger').catch(() => {});
+        setTimeout(poll, 250);
+      }
+    }
+
+    function toggleFlash() {
+      flashActive = !flashActive;
+      const btn = document.getElementById('btn-flash');
+      const lbl = document.getElementById('lbl-flash');
+      btn.classList.toggle('flash-active', flashActive);
+      lbl.innerText = flashActive ? "Đèn BẬT" : "Đèn Flash";
+      if (!isDemoMode) fetch('/flash').catch(() => {});
+    }
+
+    function cycleWeight() {
+      if (isDemoMode) {
+        demoIndex = (demoIndex + 1) % DEMO_SAMPLES.length;
+        renderData(DEMO_SAMPLES[demoIndex]);
+      } else {
+        fetch('/cycle_weight').then(poll).catch(() => {});
+      }
+    }
+
+    syncPriceInputs();
+    setInterval(poll, 350);
+    poll();
     updateFrame();
   </script>
 </body>
@@ -297,12 +1218,12 @@ static esp_err_t capture_handler(httpd_req_t *req) {
 }
 
 static esp_err_t status_handler(httpd_req_t *req) {
-    char json[448];
+    char json[512];
     snprintf(json, sizeof(json),
              "{\"label\":\"%s\",\"confidence\":%.3f,\"x\":%u,\"y\":%u,\"weight\":%.1f,"
              "\"unit_price\":%.2f,\"total_price\":%.2f,\"sanity_ok\":%s,\"detected\":%s,"
              "\"dsp_ms\":%u,\"infer_ms\":%u,\"total_ms\":%u,\"fps\":%.1f,"
-             "\"votes\":%u,\"burst_total\":%u,"
+             "\"votes\":%u,\"burst_total\":%u,\"stm32_live\":%s,"
              "\"temp\":%.1f,\"psram_kb\":%u,\"heap_kb\":%u}",
              g_telemetry.label, g_telemetry.confidence, g_telemetry.x, g_telemetry.y,
              g_telemetry.weight_g, g_telemetry.unit_price, g_telemetry.total_price,
@@ -310,6 +1231,7 @@ static esp_err_t status_handler(httpd_req_t *req) {
              g_telemetry.detected ? "true" : "false",
              g_telemetry.dsp_ms, g_telemetry.infer_ms, g_telemetry.total_ms, g_telemetry.fps,
              g_telemetry.votes, g_telemetry.burst_total,
+             g_telemetry.stm32_live ? "true" : "false",
              temperatureRead(), ESP.getFreePsram() / 1024, ESP.getFreeHeap() / 1024);
 
     httpd_resp_set_type(req, "application/json");
@@ -511,7 +1433,7 @@ void setup() {
 // ----------------------------------------------------------------------------
 // Burst Voting Inference (Temporal Consensus Ensemble)
 // ----------------------------------------------------------------------------
-bool runBurstInference() {
+bool runBurstInference(float override_weight_g) {
     if (!snapshot_buf) {
         Serial.println("[ERROR] Cannot infer: Snapshot buffer not allocated.");
         return false;
@@ -685,28 +1607,37 @@ bool runBurstInference() {
     const char* mode_str = "Random";
 
     if (detected_any) {
-        if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) {
+        if (override_weight_g > 0.0f) {
+            weight_g = override_weight_g;
+            mode_str = "STM32 HX711 Live";
+            g_telemetry.stm32_live = true;
+        } else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) {
             weight_g = 200.0f;
-            mode_str = "Fixed 200g";
+            mode_str = "Fixed 200g (Mock)";
+            g_telemetry.stm32_live = false;
         } else if (g_weight_mode == MOCK_WEIGHT_TOO_LIGHT) {
             weight_g = 15.0f;
-            mode_str = "Fault Test 15g";
+            mode_str = "Fault Test 15g (Mock)";
+            g_telemetry.stm32_live = false;
         } else {
             // Realistic random weight with 0.1g resolution
             if (strcmp(winner_label, "apple") == 0)       weight_g = (float)random(1600, 2300) / 10.0f;
             else if (strcmp(winner_label, "orange") == 0) weight_g = (float)random(1400, 2000) / 10.0f;
             else if (strcmp(winner_label, "pear") == 0)   weight_g = (float)random(1800, 2700) / 10.0f;
             else                                          weight_g = (float)random(1500, 2200) / 10.0f;
-            mode_str = "Random Realistic";
+            mode_str = "Random Realistic (Mock)";
+            g_telemetry.stm32_live = false;
         }
 
-        unit_price = 2.00f;
+        unit_price = 50000.0f;
         if (strcmp(winner_label, "apple") == 0)       unit_price = UNIT_PRICE_APPLE;
         else if (strcmp(winner_label, "orange") == 0) unit_price = UNIT_PRICE_ORANGE;
         else if (strcmp(winner_label, "pear") == 0)   unit_price = UNIT_PRICE_PEAR;
 
         total_price = (weight_g / 1000.0f) * unit_price;
         sanity_ok = (weight_g >= 50.0f && weight_g <= 600.0f);
+    } else {
+        g_telemetry.stm32_live = (override_weight_g > 0.0f);
     }
 
     // 8. Update Live Telemetry for Web Dashboard
@@ -733,9 +1664,9 @@ bool runBurstInference() {
                       winner_label, winner_votes, BURST_SAMPLE_COUNT,
                       ((float)winner_votes / BURST_SAMPLE_COUNT) * 100.0f);
         Serial.printf("  Average Confidence: %.1f%%\n", winner_avg_conf * 100.0f);
-        Serial.printf("  Simulated Mass:     %.1f g (%.3f kg) [%s]\n", weight_g, weight_g / 1000.0f, mode_str);
-        Serial.printf("  Unit Price:         $%.2f / kg\n", unit_price);
-        Serial.printf("  TOTAL CHARGE:       $%.2f\n", total_price);
+        Serial.printf("  Mass:               %.1f g (%.3f kg) [%s]\n", weight_g, weight_g / 1000.0f, mode_str);
+        Serial.printf("  Unit Price:         %.0f VND / kg\n", unit_price);
+        Serial.printf("  TOTAL CHARGE:       %.0f VND\n", total_price);
         Serial.printf("  Sanity Check:       %s\n", sanity_ok ? "PASSED (Valid fruit weight)" : "REJECTED (Weight out of range)");
     } else {
         Serial.println("  >> RESULT:          EMPTY SCALE (0/4 detections)");
@@ -746,11 +1677,16 @@ bool runBurstInference() {
 
     // 10. Forward Result to STM32 Master via UART
     if (detected_any) {
+        // Binary framed packet for embedded STM32 parsers
         STM32_Serial.write(0xAA);
         STM32_Serial.write(winner_label[0]); // 'a'=apple, 'o'=orange, 'p'=pear
         STM32_Serial.write((uint8_t)(winner_avg_conf * 100.0f));
         STM32_Serial.write(winner_votes); // Send consensus vote count
         STM32_Serial.write(0x55);
+
+        // Human-readable ASCII string for string-based STM32 firmware
+        STM32_Serial.printf("RES:%s,%d,%.1f\r\n", winner_label, (int)(winner_avg_conf * 100.0f), weight_g);
+
         delay(15);
         digitalWrite(STATUS_LED_PIN, HIGH);
     }
@@ -778,20 +1714,122 @@ static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
 }
 
 // ----------------------------------------------------------------------------
+// Robust Multi-Format STM32 Inter-Chip UART Parser
+// Supports:
+//   1. Binary framed packets with weight in decigrams or grams
+//   2. Human-readable ASCII lines: "W:245.3\n" or "245.3\n"
+//   3. Single trigger byte: 0xAA
+// ----------------------------------------------------------------------------
+static uint8_t  s_stm32_rx_buf[64];
+static size_t   s_stm32_rx_len = 0;
+static uint32_t s_stm32_last_rx_ms = 0;
+static float    s_last_live_weight_g = -1.0f;
+static bool     s_has_live_stm32 = false;
+
+void processStm32Uart() {
+    while (STM32_Serial.available()) {
+        uint8_t b = STM32_Serial.read();
+        s_stm32_last_rx_ms = millis();
+
+        // 1. Binary Packet Starting with 0xAA
+        if (s_stm32_rx_len == 0 && b == 0xAA) {
+            s_stm32_rx_buf[s_stm32_rx_len++] = b;
+            continue;
+        }
+
+        if (s_stm32_rx_len > 0 && s_stm32_rx_buf[0] == 0xAA) {
+            if (s_stm32_rx_len < sizeof(s_stm32_rx_buf)) {
+                s_stm32_rx_buf[s_stm32_rx_len++] = b;
+            }
+
+            // Check for Binary Packet End (0x55)
+            if (b == 0x55) {
+                float measured_weight = -1.0f;
+                bool valid = false;
+
+                // Format 1: [0xAA][CMD][MSB][LSB][CHK][0x55] (6 bytes)
+                if (s_stm32_rx_len == 6) {
+                    uint8_t cmd = s_stm32_rx_buf[1];
+                    uint16_t raw_w = ((uint16_t)s_stm32_rx_buf[2] << 8) | s_stm32_rx_buf[3];
+                    uint8_t chk = s_stm32_rx_buf[4];
+                    uint8_t expected_chk = cmd ^ s_stm32_rx_buf[2] ^ s_stm32_rx_buf[3];
+                    if (chk == expected_chk || chk == 0) {
+                        measured_weight = (float)raw_w / 10.0f;
+                        valid = true;
+                    }
+                }
+                // Format 2: [0xAA][MSB][LSB][0x55] (4 bytes)
+                else if (s_stm32_rx_len == 4) {
+                    uint16_t raw_w = ((uint16_t)s_stm32_rx_buf[1] << 8) | s_stm32_rx_buf[2];
+                    measured_weight = (raw_w > 10000) ? (float)raw_w : ((float)raw_w / 10.0f);
+                    valid = true;
+                }
+
+                if (valid && measured_weight > 0.0f) {
+                    s_has_live_stm32 = true;
+                    s_last_live_weight_g = measured_weight;
+                    Serial.printf("\n[STM32 UART] Binary packet parsed! Live HX711 Mass: %.1f g\n", measured_weight);
+                    s_stm32_rx_len = 0;
+                    runBurstInference(measured_weight);
+                    return;
+                }
+                s_stm32_rx_len = 0;
+            }
+            continue;
+        }
+
+        // 2. ASCII text string line (ends with '\n' or '\r')
+        if (b == '\n' || b == '\r') {
+            if (s_stm32_rx_len > 0) {
+                s_stm32_rx_buf[s_stm32_rx_len] = '\0';
+                char* str = (char*)s_stm32_rx_buf;
+                // Search for numeric digits (e.g. "W:245.3" or "245.3")
+                char* p = str;
+                while (*p && !isdigit(*p) && *p != '.') p++;
+                if (*p) {
+                    float w = atof(p);
+                    if (w > 0.0f) {
+                        s_has_live_stm32 = true;
+                        s_last_live_weight_g = w;
+                        Serial.printf("\n[STM32 UART] ASCII packet parsed: '%s' -> Live HX711 Mass: %.1f g\n", str, w);
+                        s_stm32_rx_len = 0;
+                        runBurstInference(w);
+                        return;
+                    }
+                }
+                s_stm32_rx_len = 0;
+            }
+        } else if (b >= 32 && b <= 126) {
+            // Printable ASCII character
+            if (s_stm32_rx_len < sizeof(s_stm32_rx_buf) - 1) {
+                s_stm32_rx_buf[s_stm32_rx_len++] = b;
+            }
+        }
+    }
+
+    // 3. Timeout check for Single-Byte Trigger:
+    // If we received just 0xAA and nothing else arrived within 25ms, it's a single-byte trigger!
+    if (s_stm32_rx_len == 1 && s_stm32_rx_buf[0] == 0xAA && (millis() - s_stm32_last_rx_ms >= 25)) {
+        Serial.println("\n[STM32 UART] Single-byte trigger (0xAA) received from STM32 Master!");
+        s_stm32_rx_len = 0;
+        runBurstInference(s_has_live_stm32 ? s_last_live_weight_g : -1.0f);
+        return;
+    }
+
+    // Clear buffer if stalled with incomplete data (>200ms)
+    if (s_stm32_rx_len > 0 && (millis() - s_stm32_last_rx_ms > 200)) {
+        s_stm32_rx_len = 0;
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Main Loop
 // ----------------------------------------------------------------------------
 void loop() {
     handleSerialCommands();
 
-    // Check for capture command from STM32 UART (0xAA)
-    if (STM32_Serial.available()) {
-        uint8_t byte = STM32_Serial.read();
-        if (byte == 0xAA) {
-            Serial.println("\n[UART EVENT] Received capture trigger (0xAA) from STM32 Master!");
-            runBurstInference();
-            return;
-        }
-    }
+    // Process inter-chip UART stream from STM32 (Binary, ASCII, or single 0xAA byte)
+    processStm32Uart();
 
     // In continuous mode, run a burst periodically (every 2.5 seconds)
     if (g_continuous_mode) {
@@ -802,7 +1840,7 @@ void loop() {
         }
     }
 
-    delay(30); // Generous yield to FreeRTOS HTTP server and Wi-Fi stack
+    delay(20); // Generous yield to FreeRTOS HTTP server and Wi-Fi stack
 }
 
 // ----------------------------------------------------------------------------
