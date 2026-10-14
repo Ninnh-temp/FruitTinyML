@@ -89,18 +89,21 @@ struct LiveScaleTelemetry {
     uint8_t burst_total;
     bool stm32_live;
 };
-static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f, 0, 4, false};
-
 // --- Burst Voting Configuration (Temporal Consensus Ensemble) ---
-#define BURST_SAMPLE_COUNT     4    // Frames captured per inference event
-#define BURST_FRAME_DELAY_MS  25    // Yield interval between burst frames for exposure/FreeRTOS
+#define BURST_SAMPLE_COUNT     3    // Max 3 frames with 2-frame early exit
+#define BURST_FRAME_DELAY_MS  30    // Yield interval between burst frames for exposure/FreeRTOS
 
 // --- Camera & Inference Resolution ---
-#define CAMERA_RAW_WIDTH   320
-#define CAMERA_RAW_HEIGHT  240
+#define CAMERA_RAW_WIDTH      320
+#define CAMERA_RAW_HEIGHT     240
+#define MAX_JPEG_BUF_SIZE     (32 * 1024) // 32 KB staging buffer for compressed QVGA JPEG
+
+static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f, 0, BURST_SAMPLE_COUNT, false};
 
 // Buffers & Sync
 static uint8_t *snapshot_buf = nullptr;
+static uint8_t *jpeg_stage_buf = nullptr;
+static volatile bool g_web_trigger_pending = false;
 static bool g_flash_state = false;
 static bool g_continuous_mode = false; // Default: Triggered burst mode for high-FPS live stream
 static SemaphoreHandle_t s_camera_mutex = NULL;
@@ -1250,13 +1253,13 @@ static esp_err_t cycle_weight_handler(httpd_req_t *req) {
     if (g_weight_mode == MOCK_WEIGHT_RANDOM) g_weight_mode = MOCK_WEIGHT_FIXED_200G;
     else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) g_weight_mode = MOCK_WEIGHT_TOO_LIGHT;
     else g_weight_mode = MOCK_WEIGHT_RANDOM;
-    runBurstInference();
+    g_web_trigger_pending = true;
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t trigger_handler(httpd_req_t *req) {
-    runBurstInference();
+    g_web_trigger_pending = true;
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
 }
@@ -1382,6 +1385,16 @@ void setup() {
         Serial.printf("[MEMORY] Allocated %u KB snapshot buffer successfully.\n", rgb_buf_size / 1024);
     }
 
+    jpeg_stage_buf = (uint8_t*)ps_malloc(MAX_JPEG_BUF_SIZE);
+    if (!jpeg_stage_buf) {
+        jpeg_stage_buf = (uint8_t*)malloc(MAX_JPEG_BUF_SIZE);
+    }
+    if (!jpeg_stage_buf) {
+        Serial.println("[CRITICAL ERROR] Insufficient memory for JPEG staging buffer!");
+    } else {
+        Serial.printf("[MEMORY] Allocated %u KB JPEG staging buffer successfully.\n", MAX_JPEG_BUF_SIZE / 1024);
+    }
+
     // 3. Start Wi-Fi SoftAP FIRST (Guarantees Wi-Fi is NEVER blocked by cold camera)
     Serial.println("\n[WIFI] Initializing SoftAP...");
     WiFi.mode(WIFI_AP);
@@ -1409,6 +1422,7 @@ void setup() {
     }
 
     // 6. Initialize STM32 UART Link
+    STM32_Serial.setRxBufferSize(512);
     STM32_Serial.begin(STM32_BAUD, SERIAL_8N1, STM32_RX_PIN, STM32_TX_PIN);
     Serial.printf("[UART] STM32 inter-chip link ready on RX: GPIO %d, TX: GPIO %d @ %d baud\n",
                   STM32_RX_PIN, STM32_TX_PIN, STM32_BAUD);
@@ -1434,8 +1448,8 @@ void setup() {
 // Burst Voting Inference (Temporal Consensus Ensemble)
 // ----------------------------------------------------------------------------
 bool runBurstInference(float override_weight_g) {
-    if (!snapshot_buf) {
-        Serial.println("[ERROR] Cannot infer: Snapshot buffer not allocated.");
+    if (!snapshot_buf || !jpeg_stage_buf) {
+        Serial.println("[ERROR] Cannot infer: Snapshot or staging buffer not allocated.");
         return false;
     }
 
@@ -1456,20 +1470,29 @@ bool runBurstInference(float override_weight_g) {
     uint8_t valid_frames = 0;
 
     for (int frame = 0; frame < BURST_SAMPLE_COUNT; frame++) {
-        // 1. Thread-safe snapshot grab (releases mutex immediately after copy)
-        camera_fb_t *fb = NULL;
-        if (xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-            fb = esp_camera_fb_get();
+        // 1. Fast Thread-safe snapshot grab (< 1ms lock duration)
+        size_t jpeg_len = 0;
+        if (xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            camera_fb_t *fb = esp_camera_fb_get();
             if (fb) {
-                fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, snapshot_buf);
+                if (fb->len <= MAX_JPEG_BUF_SIZE) {
+                    memcpy(jpeg_stage_buf, fb->buf, fb->len);
+                    jpeg_len = fb->len;
+                }
                 esp_camera_fb_return(fb);
             }
             xSemaphoreGive(s_camera_mutex);
         }
 
-        if (!fb) {
+        if (jpeg_len == 0) {
             Serial.printf("  ├─ Frame %d/%d: [FAIL] Camera buffer acquire timeout\n", frame + 1, BURST_SAMPLE_COUNT);
-            delay(10);
+            vTaskDelay(pdMS_TO_TICKS(15));
+            continue;
+        }
+
+        // Decode JPEG -> RGB888 OUTSIDE camera mutex so /capture never blocks
+        if (!fmt2rgb888(jpeg_stage_buf, jpeg_len, PIXFORMAT_JPEG, snapshot_buf)) {
+            Serial.printf("  ├─ Frame %d/%d: [FAIL] fmt2rgb888 decode failed\n", frame + 1, BURST_SAMPLE_COUNT);
             continue;
         }
 
@@ -1552,9 +1575,22 @@ bool runBurstInference(float override_weight_g) {
                           frame + 1, BURST_SAMPLE_COUNT, result.timing.classification);
         }
 
+        // 2-of-3 Early-Exit Consensus check
+        if (valid_frames == 2) {
+            bool strong_apple  = (votes_apple == 2  && (conf_sum_apple / 2.0f) >= 0.60f);
+            bool strong_orange = (votes_orange == 2 && (conf_sum_orange / 2.0f) >= 0.60f);
+            bool strong_pear   = (votes_pear == 2   && (conf_sum_pear / 2.0f) >= 0.60f);
+            bool both_empty    = (votes_apple == 0 && votes_orange == 0 && votes_pear == 0);
+
+            if (strong_apple || strong_orange || strong_pear || both_empty) {
+                Serial.println("  └─ [EARLY EXIT] 2/2 frames reached unanimous consensus!");
+                break;
+            }
+        }
+
         // Yield between frames to let sensor exposure settle and Wi-Fi service packets
         if (frame + 1 < BURST_SAMPLE_COUNT) {
-            delay(BURST_FRAME_DELAY_MS);
+            vTaskDelay(pdMS_TO_TICKS(BURST_FRAME_DELAY_MS));
         }
     }
 
@@ -1640,6 +1676,8 @@ bool runBurstInference(float override_weight_g) {
         g_telemetry.stm32_live = (override_weight_g > 0.0f);
     }
 
+    uint8_t evaluated_frames = valid_frames > 0 ? valid_frames : BURST_SAMPLE_COUNT;
+
     // 8. Update Live Telemetry for Web Dashboard
     strncpy(g_telemetry.label, winner_label, sizeof(g_telemetry.label) - 1);
     g_telemetry.confidence = winner_avg_conf;
@@ -1651,7 +1689,7 @@ bool runBurstInference(float override_weight_g) {
     g_telemetry.sanity_ok = sanity_ok;
     g_telemetry.detected = detected_any;
     g_telemetry.votes = winner_votes;
-    g_telemetry.burst_total = BURST_SAMPLE_COUNT;
+    g_telemetry.burst_total = evaluated_frames;
     g_telemetry.dsp_ms = valid_frames ? (total_dsp_ms / valid_frames) : 0;
     g_telemetry.infer_ms = valid_frames ? (total_infer_ms / valid_frames) : 0;
     g_telemetry.total_ms = t_burst_total;
@@ -1661,15 +1699,15 @@ bool runBurstInference(float override_weight_g) {
     Serial.println("  -----------------------------------------------------");
     if (detected_any) {
         Serial.printf("  >> BURST WINNER:   [%s] (%u/%u votes, %.0f%% consensus)\n",
-                      winner_label, winner_votes, BURST_SAMPLE_COUNT,
-                      ((float)winner_votes / BURST_SAMPLE_COUNT) * 100.0f);
+                      winner_label, winner_votes, evaluated_frames,
+                      ((float)winner_votes / evaluated_frames) * 100.0f);
         Serial.printf("  Average Confidence: %.1f%%\n", winner_avg_conf * 100.0f);
         Serial.printf("  Mass:               %.1f g (%.3f kg) [%s]\n", weight_g, weight_g / 1000.0f, mode_str);
         Serial.printf("  Unit Price:         %.0f VND / kg\n", unit_price);
         Serial.printf("  TOTAL CHARGE:       %.0f VND\n", total_price);
         Serial.printf("  Sanity Check:       %s\n", sanity_ok ? "PASSED (Valid fruit weight)" : "REJECTED (Weight out of range)");
     } else {
-        Serial.println("  >> RESULT:          EMPTY SCALE (0/4 detections)");
+        Serial.printf("  >> RESULT:          EMPTY SCALE (0/%u detections)\n", evaluated_frames);
     }
     Serial.printf("  Burst Duration:     %u ms (avg infer: %u ms/frame)\n",
                   t_burst_total, valid_frames ? (total_infer_ms / valid_frames) : 0);
@@ -1687,7 +1725,7 @@ bool runBurstInference(float override_weight_g) {
         // Human-readable ASCII string for string-based STM32 firmware
         STM32_Serial.printf("RES:%s,%d,%.1f\r\n", winner_label, (int)(winner_avg_conf * 100.0f), weight_g);
 
-        delay(15);
+        vTaskDelay(pdMS_TO_TICKS(15));
         digitalWrite(STATUS_LED_PIN, HIGH);
     }
 
@@ -1831,6 +1869,11 @@ void loop() {
     // Process inter-chip UART stream from STM32 (Binary, ASCII, or single 0xAA byte)
     processStm32Uart();
 
+    if (g_web_trigger_pending) {
+        g_web_trigger_pending = false;
+        runBurstInference();
+    }
+
     // In continuous mode, run a burst periodically (every 2.5 seconds)
     if (g_continuous_mode) {
         static uint32_t s_last_burst_time = 0;
@@ -1876,7 +1919,7 @@ void handleSerialCommands() {
             Serial.println("  [f] Toggle High-Power Flashlight LED");
             Serial.println("  [m] Toggle Continuous vs. Triggered mode");
             Serial.println("  [w] Cycle Mock Weight Mode (Random -> Fixed 200g -> Fault 15g)");
-            Serial.println("  [Space] Trigger 4-frame Burst Inference (in Triggered mode)");
+            Serial.println("  [Space] Trigger Burst Inference (in Triggered mode)");
             Serial.println("  [b] Print comprehensive Benchmark Performance Summary");
             Serial.println("  [?] Print this help menu\n");
         }
