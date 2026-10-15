@@ -96,12 +96,12 @@ struct LiveScaleTelemetry {
 };
 // --- Burst Voting Configuration (Temporal Consensus Ensemble) ---
 #define BURST_SAMPLE_COUNT     3    // Max 3 frames with 2-frame early exit
-#define BURST_FRAME_DELAY_MS  30    // Yield interval between burst frames for exposure/FreeRTOS
+#define BURST_FRAME_DELAY_MS  10    // Minimal 10ms yield between frames
 
 // --- Camera & Inference Resolution ---
 #define CAMERA_RAW_WIDTH      320
 #define CAMERA_RAW_HEIGHT     240
-#define MAX_JPEG_BUF_SIZE     (32 * 1024) // 32 KB staging buffer for compressed QVGA JPEG
+#define MAX_JPEG_BUF_SIZE     (20 * 1024) // 20 KB in Internal SRAM (320x240 Q12 JPEG is ~6-10 KB)
 
 static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f, 0, BURST_SAMPLE_COUNT, false};
 
@@ -1492,14 +1492,14 @@ void setup() {
         Serial.printf("[MEMORY] Allocated %u KB snapshot buffer successfully.\n", rgb_buf_size / 1024);
     }
 
-    jpeg_stage_buf = (uint8_t*)ps_malloc(MAX_JPEG_BUF_SIZE);
+    jpeg_stage_buf = (uint8_t*)heap_caps_malloc(MAX_JPEG_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!jpeg_stage_buf) {
-        jpeg_stage_buf = (uint8_t*)malloc(MAX_JPEG_BUF_SIZE);
+        jpeg_stage_buf = (uint8_t*)ps_malloc(MAX_JPEG_BUF_SIZE);
     }
     if (!jpeg_stage_buf) {
         Serial.println("[CRITICAL ERROR] Insufficient memory for JPEG staging buffer!");
     } else {
-        Serial.printf("[MEMORY] Allocated %u KB JPEG staging buffer successfully.\n", MAX_JPEG_BUF_SIZE / 1024);
+        Serial.printf("[MEMORY] Allocated %u KB JPEG staging buffer in fast RAM.\n", MAX_JPEG_BUF_SIZE / 1024);
     }
 
     // Allocate ai_input_buf (96 * 96 * 3 = 27,648 bytes) in Fast Internal SRAM
@@ -1631,19 +1631,18 @@ bool runBurstInference(float override_weight_g) {
 
         valid_frames++;
 
-        // 2. Fast RAM LUT resize: 320x240 RGB888 (PSRAM) -> 96x96 RGB888 into Fast Internal SRAM (~1.5 ms)
+        // 2. Fast Cache-Friendly RAM LUT resize: 320x240 RGB888 -> 96x96 RGB888 in Internal SRAM (< 1 ms)
         if (resize_lut) {
             const size_t total_pixels = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
-            const uint32_t row_stride = CAMERA_RAW_WIDTH * 3;
+            const uint8_t * __restrict src_base = snapshot_buf;
+            uint8_t * __restrict dst = ai_input_buf;
+            const uint32_t * __restrict lut = resize_lut;
             for (size_t p = 0; p < total_pixels; p++) {
-                uint32_t s0 = resize_lut[p];
-                uint32_t s1 = s0 + 3;
-                uint32_t s2 = s0 + row_stride;
-                uint32_t s3 = s2 + 3;
-                size_t dst_idx = p * 3;
-                ai_input_buf[dst_idx]     = (uint8_t)(((uint16_t)snapshot_buf[s0]     + snapshot_buf[s1]     + snapshot_buf[s2]     + snapshot_buf[s3]     + 2) >> 2);
-                ai_input_buf[dst_idx + 1] = (uint8_t)(((uint16_t)snapshot_buf[s0 + 1] + snapshot_buf[s1 + 1] + snapshot_buf[s2 + 1] + snapshot_buf[s3 + 1] + 2) >> 2);
-                ai_input_buf[dst_idx + 2] = (uint8_t)(((uint16_t)snapshot_buf[s0 + 2] + snapshot_buf[s1 + 2] + snapshot_buf[s2 + 2] + snapshot_buf[s3 + 2] + 2) >> 2);
+                const uint8_t *s = src_base + lut[p];
+                dst[0] = s[0];
+                dst[1] = s[1];
+                dst[2] = s[2];
+                dst += 3;
             }
         } else {
             ei::image::processing::crop_and_interpolate_rgb888(
@@ -1790,19 +1789,20 @@ bool runBurstInference(float override_weight_g) {
     bool sanity_ok = false;
     const char* mode_str = "Random";
 
-    if (detected_any) {
-        if (override_weight_g > 0.0f) {
-            weight_g = override_weight_g;
-            mode_str = "STM32 HX711 Live";
-            g_telemetry.stm32_live = true;
-        } else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) {
+    if (override_weight_g >= 0.0f) {
+        // Real HX711 data from STM32 (including 0g on an empty pan) ALWAYS wins,
+        // regardless of whether the camera recognised a fruit or not.
+        weight_g = override_weight_g;
+        mode_str = "STM32 HX711 Live";
+        g_telemetry.stm32_live = true;
+    } else if (detected_any) {
+        // No STM32 link yet -> fall back to simulated metrology (demo / bench test only)
+        if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) {
             weight_g = 200.0f;
             mode_str = "Fixed 200g (Mock)";
-            g_telemetry.stm32_live = false;
         } else if (g_weight_mode == MOCK_WEIGHT_TOO_LIGHT) {
             weight_g = 15.0f;
             mode_str = "Fault Test 15g (Mock)";
-            g_telemetry.stm32_live = false;
         } else {
             // Realistic random weight with 0.1g resolution
             if (strcmp(winner_label, "apple") == 0)       weight_g = (float)random(1600, 2300) / 10.0f;
@@ -1810,9 +1810,15 @@ bool runBurstInference(float override_weight_g) {
             else if (strcmp(winner_label, "pear") == 0)   weight_g = (float)random(1800, 2700) / 10.0f;
             else                                          weight_g = (float)random(1500, 2200) / 10.0f;
             mode_str = "Random Realistic (Mock)";
-            g_telemetry.stm32_live = false;
         }
+        g_telemetry.stm32_live = false;
+    } else {
+        // No STM32 link and nothing detected -> empty reading
+        g_telemetry.stm32_live = false;
+    }
 
+    // Pricing only applies when a fruit is recognised AND there is a positive mass
+    if (detected_any && weight_g > 0.0f) {
         unit_price = 50000.0f;
         if (strcmp(winner_label, "apple") == 0)       unit_price = g_price_apple;
         else if (strcmp(winner_label, "orange") == 0) unit_price = g_price_orange;
@@ -1820,8 +1826,6 @@ bool runBurstInference(float override_weight_g) {
 
         total_price = (weight_g / 1000.0f) * unit_price;
         sanity_ok = (weight_g >= 50.0f && weight_g <= 600.0f);
-    } else {
-        g_telemetry.stm32_live = (override_weight_g > 0.0f);
     }
 
     uint8_t evaluated_frames = valid_frames > 0 ? valid_frames : BURST_SAMPLE_COUNT;
@@ -1870,13 +1874,9 @@ bool runBurstInference(float override_weight_g) {
                             weight_g,
                             total_price);
 
-        // Binary framed packet terminated with newline so it never corrupts the ASCII parser
-        STM32_Serial.write(0xAA);
-        STM32_Serial.write(winner_label[0]); // 'a'=apple, 'o'=orange, 'p'=pear
-        STM32_Serial.write((uint8_t)(winner_avg_conf * 100.0f));
-        STM32_Serial.write(winner_votes);
-        STM32_Serial.write(0x55);
-        STM32_Serial.write('\n');
+        // NOTE: Only the ASCII RES line is sent. The legacy binary frame
+        // (0xAA ... 0x55 '\n') was removed because its printable bytes corrupted
+        // the STM32's ASCII line buffer (uart_rx_buf).
 
         vTaskDelay(pdMS_TO_TICKS(15));
         digitalWrite(STATUS_LED_PIN, HIGH);
@@ -2050,7 +2050,7 @@ void loop() {
         static uint32_t s_last_burst_time = 0;
         if (millis() - s_last_burst_time >= 2500) {
             s_last_burst_time = millis();
-            runBurstInference();
+            runBurstInference(s_has_live_stm32 ? s_last_live_weight_g : -1.0f);
         }
     }
 
