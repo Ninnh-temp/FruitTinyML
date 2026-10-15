@@ -22,6 +22,7 @@
 #include <WiFi.h>
 #include "esp_http_server.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 
 // Edge Impulse TinyML Vision Model
 #include <a3FruitVision_V1_inferencing.h>
@@ -60,9 +61,13 @@
 HardwareSerial STM32_Serial(2);
 
 // --- Mock / Simulated STM32 Metrology & Pricing (VND) ---
-#define UNIT_PRICE_APPLE    60000.0f  // 60,000 VND / kg
-#define UNIT_PRICE_ORANGE   40000.0f  // 40,000 VND / kg
-#define UNIT_PRICE_PEAR     70000.0f  // 70,000 VND / kg
+#define UNIT_PRICE_APPLE    60000.0f  // Default 60,000 VND / kg
+#define UNIT_PRICE_ORANGE   40000.0f  // Default 40,000 VND / kg
+#define UNIT_PRICE_PEAR     70000.0f  // Default 70,000 VND / kg
+
+static float g_price_apple  = UNIT_PRICE_APPLE;
+static float g_price_orange = UNIT_PRICE_ORANGE;
+static float g_price_pear   = UNIT_PRICE_PEAR;
 
 enum MockWeightMode {
     MOCK_WEIGHT_RANDOM,      // Realistic random weight per detected fruit
@@ -101,9 +106,13 @@ struct LiveScaleTelemetry {
 static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f, 0, BURST_SAMPLE_COUNT, false};
 
 // Buffers & Sync
-static uint8_t *snapshot_buf = nullptr;
-static uint8_t *jpeg_stage_buf = nullptr;
-static volatile bool g_web_trigger_pending = false;
+static uint8_t  *snapshot_buf = nullptr;     // 320x240x3 RGB888 buffer in PSRAM
+static uint8_t  *ai_input_buf = nullptr;     // 96x96x3 RGB888 buffer in Fast Internal SRAM (27.6 KB)
+static uint32_t *resize_lut   = nullptr;     // Pre-computed 96x96 byte offset Lookup Table in RAM (36.8 KB)
+static uint8_t  *jpeg_stage_buf = nullptr;   // 32 KB compressed JPEG staging & stream cache in RAM
+static volatile size_t g_cached_jpeg_len = 0;
+static volatile bool   g_burst_active = false;
+static volatile bool   g_web_trigger_pending = false;
 static bool g_flash_state = false;
 static bool g_continuous_mode = false; // Default: Triggered burst mode for high-FPS live stream
 static SemaphoreHandle_t s_camera_mutex = NULL;
@@ -117,6 +126,7 @@ static uint32_t g_max_infer_time_ms = 0;
 
 // Function Prototypes
 bool initCamera();
+void initResizeLut();
 bool runBurstInference(float override_weight_g = -1.0f);
 void processStm32Uart();
 static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr);
@@ -149,12 +159,15 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       --green-glow: rgba(34, 197, 94, 0.2);
       --amber: #f59e0b;
       --red: #ef4444;
-      --mono: ui-monospace, "SF Mono", "Cascadia Code", "Courier New", monospace;
+      --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: Consolas, "Cascadia Mono", "Segoe UI Mono", "Roboto Mono", "SF Mono", monospace;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      font-family: var(--font-sans);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
       background: var(--bg);
       color: var(--text);
       min-height: 100vh;
@@ -323,7 +336,8 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       padding: 4px 10px;
       border-radius: 6px;
       font-size: 0.72rem;
-      font-family: var(--mono);
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
       font-weight: 600;
       color: var(--text-muted);
     }
@@ -417,12 +431,12 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       gap: 8px;
     }
     .mass-val {
-      font-family: var(--mono);
+      font-family: var(--font-sans);
+      font-variant-numeric: tabular-nums;
       font-size: 3.4rem;
       font-weight: 800;
       line-height: 1;
-      letter-spacing: -1.5px;
-      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.5px;
       color: var(--text);
     }
     .mass-unit {
@@ -431,7 +445,8 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       color: var(--text-muted);
     }
     .mass-kg-sub {
-      font-family: var(--mono);
+      font-family: var(--font-sans);
+      font-variant-numeric: tabular-nums;
       font-size: 1rem;
       font-weight: 600;
       color: var(--text-dim);
@@ -450,9 +465,11 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       flex-direction: column;
     }
     .price-total-val {
-      font-family: var(--mono);
+      font-family: var(--font-sans);
+      font-variant-numeric: tabular-nums;
       font-size: 2.3rem;
       font-weight: 800;
+      letter-spacing: -0.5px;
       color: var(--accent);
       line-height: 1;
     }
@@ -566,7 +583,8 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       border: 1px solid rgba(255, 255, 255, 0.15);
       border-radius: 6px;
       color: var(--text);
-      font-family: var(--mono);
+      font-family: var(--font-sans);
+      font-variant-numeric: tabular-nums;
       font-size: 0.88rem;
       font-weight: 700;
       padding: 4px 6px;
@@ -633,8 +651,10 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       color: var(--text-dim);
     }
     .telem-pulse {
-      font-size: 0.7rem;
-      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-family: var(--font-sans);
+      font-weight: 700;
+      letter-spacing: 0.5px;
       color: var(--accent);
       display: flex;
       align-items: center;
@@ -668,7 +688,8 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       text-transform: uppercase;
     }
     .telem-v {
-      font-family: var(--mono);
+      font-family: var(--font-sans);
+      font-variant-numeric: tabular-nums;
       font-size: 0.88rem;
       font-weight: 700;
       color: var(--text);
@@ -1002,6 +1023,9 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 
     function savePrices() {
       try { localStorage.setItem('scale_prices_vnd_kg', JSON.stringify(customPrices)); } catch(e){}
+      if (!isDemoMode) {
+        fetch(`/set_prices?apple=${Math.round(customPrices.apple)}&orange=${Math.round(customPrices.orange)}&pear=${Math.round(customPrices.pear)}`).catch(() => {});
+      }
     }
 
     function createSvgView(label) {
@@ -1011,11 +1035,21 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" fill="%23020408"/><circle cx="160" cy="120" r="52" fill="${encodeURIComponent(c)}" opacity="0.3"/><circle cx="160" cy="120" r="38" fill="${encodeURIComponent(c)}" opacity="0.75"/><text x="160" y="132" font-size="38" text-anchor="middle" font-family="sans-serif">${encodeURIComponent(icon)}</text></svg>`;
     }
 
+    let lastFrameTime = performance.now();
+    let rollingStreamFps = 12.0;
+
     function updateFrame() {
       if (isDemoMode) return;
       const view = document.getElementById('cam-feed');
       const img = new Image();
       img.onload = () => {
+        const now = performance.now();
+        const dt = now - lastFrameTime;
+        lastFrameTime = now;
+        if (dt > 10 && dt < 2000) {
+          rollingStreamFps = (rollingStreamFps * 0.75) + ((1000.0 / dt) * 0.25);
+          document.getElementById('cam-fps-hud').innerText = Math.round(rollingStreamFps) + " FPS";
+        }
         view.src = img.src;
         setConnectionState(true);
         setTimeout(updateFrame, 80);
@@ -1082,8 +1116,10 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       document.getElementById('target-name').innerText = isFruit ? meta.name : "Đang quét đĩa cân...";
       document.getElementById('target-conf').innerText = isFruit ? (d.confidence * 100).toFixed(0) + "%" : "--";
       const totalTime = (d.dsp_ms || 8) + (d.infer_ms || 42);
-      const fps = totalTime > 0 ? (1000 / totalTime).toFixed(0) : "20";
-      document.getElementById('cam-fps-hud').innerText = fps + " FPS";
+      const estModelFps = totalTime > 0 ? (1000 / totalTime).toFixed(0) : "20";
+      if (isDemoMode) {
+        document.getElementById('cam-fps-hud').innerText = estModelFps + " FPS";
+      }
 
       document.getElementById('fruit-emoji').innerText = meta.emoji;
       document.getElementById('fruit-title').innerText = isFruit ? meta.name : "Cân trống";
@@ -1109,7 +1145,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 
       document.getElementById('t-infer').innerText = (d.infer_ms || 42) + " ms";
       document.getElementById('t-dsp').innerText = (d.dsp_ms || 8) + " ms";
-      document.getElementById('t-fps').innerText = fps + " FPS";
+      document.getElementById('t-fps').innerText = isDemoMode ? (estModelFps + " FPS") : (Math.round(rollingStreamFps) + " FPS");
       document.getElementById('t-votes').innerText = `${votes}/${burstTotal} (${pct}%)`;
       document.getElementById('t-temp').innerText = (d.temp ? d.temp.toFixed(1) : "48.2") + " °C";
       document.getElementById('t-psram').innerText = (d.psram_kb || 3840) + " KB";
@@ -1183,6 +1219,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     }
 
     syncPriceInputs();
+    savePrices();
     setInterval(poll, 350);
     poll();
     updateFrame();
@@ -1195,27 +1232,41 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 // HTTP Server Handlers
 // ----------------------------------------------------------------------------
 static esp_err_t index_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, DASHBOARD_HTML, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t capture_handler(httpd_req_t *req) {
-    if (xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(150)) == pdTRUE) {
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) {
-            xSemaphoreGive(s_camera_mutex);
-            httpd_resp_send_500(req);
-            return ESP_FAIL;
-        }
-        httpd_resp_set_type(req, "image/jpeg");
-        httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"capture.jpg\"");
-        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-        httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
-        esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
-        esp_camera_fb_return(fb);
-        xSemaphoreGive(s_camera_mutex);
-        return res;
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"capture.jpg\"");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+
+    // Fast RAM Offload: If AI burst is running, serve latest cached JPEG straight from RAM
+    if (g_burst_active && jpeg_stage_buf && g_cached_jpeg_len > 0) {
+        return httpd_resp_send(req, (const char *)jpeg_stage_buf, g_cached_jpeg_len);
     }
+
+    if (xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(60)) == pdTRUE) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (fb) {
+            if (jpeg_stage_buf && fb->len <= MAX_JPEG_BUF_SIZE) {
+                memcpy(jpeg_stage_buf, fb->buf, fb->len);
+                g_cached_jpeg_len = fb->len;
+            }
+            esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+            esp_camera_fb_return(fb);
+            xSemaphoreGive(s_camera_mutex);
+            return res;
+        }
+        xSemaphoreGive(s_camera_mutex);
+    }
+
+    // Fallback to RAM cache if camera was momentarily busy (prevents HTTP 500 & 1500ms UI penalty)
+    if (jpeg_stage_buf && g_cached_jpeg_len > 0) {
+        return httpd_resp_send(req, (const char *)jpeg_stage_buf, g_cached_jpeg_len);
+    }
+
     httpd_resp_send_500(req);
     return ESP_FAIL;
 }
@@ -1237,7 +1288,7 @@ static esp_err_t status_handler(httpd_req_t *req) {
              g_telemetry.stm32_live ? "true" : "false",
              temperatureRead(), ESP.getFreePsram() / 1024, ESP.getFreeHeap() / 1024);
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
@@ -1245,7 +1296,7 @@ static esp_err_t status_handler(httpd_req_t *req) {
 static esp_err_t flash_handler(httpd_req_t *req) {
     g_flash_state = !g_flash_state;
     digitalWrite(FLASH_LED_PIN, g_flash_state ? HIGH : LOW);
-    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_send(req, g_flash_state ? "ON" : "OFF", HTTPD_RESP_USE_STRLEN);
 }
 
@@ -1254,13 +1305,47 @@ static esp_err_t cycle_weight_handler(httpd_req_t *req) {
     else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) g_weight_mode = MOCK_WEIGHT_TOO_LIGHT;
     else g_weight_mode = MOCK_WEIGHT_RANDOM;
     g_web_trigger_pending = true;
-    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t trigger_handler(httpd_req_t *req) {
     g_web_trigger_pending = true;
-    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t set_prices_handler(httpd_req_t *req) {
+    char query[128];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[24];
+        if (httpd_query_key_value(query, "apple", val, sizeof(val)) == ESP_OK) {
+            float p = atof(val);
+            if (p >= 0.0f) g_price_apple = p;
+        }
+        if (httpd_query_key_value(query, "orange", val, sizeof(val)) == ESP_OK) {
+            float p = atof(val);
+            if (p >= 0.0f) g_price_orange = p;
+        }
+        if (httpd_query_key_value(query, "pear", val, sizeof(val)) == ESP_OK) {
+            float p = atof(val);
+            if (p >= 0.0f) g_price_pear = p;
+        }
+        // Recalculate current telemetry price if a fruit is already on the scale
+        if (g_telemetry.detected && g_telemetry.weight_g > 0.0f) {
+            if (strcmp(g_telemetry.label, "apple") == 0)       g_telemetry.unit_price = g_price_apple;
+            else if (strcmp(g_telemetry.label, "orange") == 0) g_telemetry.unit_price = g_price_orange;
+            else if (strcmp(g_telemetry.label, "pear") == 0)   g_telemetry.unit_price = g_price_pear;
+            g_telemetry.total_price = (g_telemetry.weight_g / 1000.0f) * g_telemetry.unit_price;
+            STM32_Serial.printf("\r\nRES:%s,%d,%.1f,%.0f\r\n",
+                                g_telemetry.label,
+                                (int)(g_telemetry.confidence * 100.0f),
+                                g_telemetry.weight_g,
+                                g_telemetry.total_price);
+        }
+    }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
 }
 
@@ -1268,7 +1353,8 @@ void startWebServer() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.ctrl_port = 32768;
-    config.max_open_sockets = 5;
+    config.max_open_sockets = 6;
+    config.lru_purge_enable = true;
 
     httpd_uri_t uri_index = { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL };
     httpd_uri_t uri_capture = { .uri = "/capture", .method = HTTP_GET, .handler = capture_handler, .user_ctx = NULL };
@@ -1276,6 +1362,7 @@ void startWebServer() {
     httpd_uri_t uri_flash = { .uri = "/flash", .method = HTTP_GET, .handler = flash_handler, .user_ctx = NULL };
     httpd_uri_t uri_cycle = { .uri = "/cycle_weight", .method = HTTP_GET, .handler = cycle_weight_handler, .user_ctx = NULL };
     httpd_uri_t uri_trigger = { .uri = "/trigger", .method = HTTP_GET, .handler = trigger_handler, .user_ctx = NULL };
+    httpd_uri_t uri_set_prices = { .uri = "/set_prices", .method = HTTP_GET, .handler = set_prices_handler, .user_ctx = NULL };
 
     if (httpd_start(&s_httpd, &config) == ESP_OK) {
         httpd_register_uri_handler(s_httpd, &uri_index);
@@ -1284,6 +1371,7 @@ void startWebServer() {
         httpd_register_uri_handler(s_httpd, &uri_flash);
         httpd_register_uri_handler(s_httpd, &uri_cycle);
         httpd_register_uri_handler(s_httpd, &uri_trigger);
+        httpd_register_uri_handler(s_httpd, &uri_set_prices);
         Serial.println("[WEB] Embedded HTTP Server active on Port 80");
     }
 }
@@ -1341,6 +1429,25 @@ bool initCamera() {
 }
 
 // ----------------------------------------------------------------------------
+// Pre-Compute Center-Crop Resize Lookup Table
+// ----------------------------------------------------------------------------
+void initResizeLut() {
+    if (!resize_lut) return;
+    const int crop_dim = (CAMERA_RAW_WIDTH < CAMERA_RAW_HEIGHT) ? CAMERA_RAW_WIDTH : CAMERA_RAW_HEIGHT; // 240
+    const int offset_x = (CAMERA_RAW_WIDTH - crop_dim) / 2;  // 40
+    const int offset_y = (CAMERA_RAW_HEIGHT - crop_dim) / 2; // 0
+
+    for (int y = 0; y < EI_CLASSIFIER_INPUT_HEIGHT; y++) {
+        int src_y = offset_y + (y * crop_dim) / EI_CLASSIFIER_INPUT_HEIGHT;
+        for (int x = 0; x < EI_CLASSIFIER_INPUT_WIDTH; x++) {
+            int src_x = offset_x + (x * crop_dim) / EI_CLASSIFIER_INPUT_WIDTH;
+            resize_lut[y * EI_CLASSIFIER_INPUT_WIDTH + x] = (uint32_t)((src_y * CAMERA_RAW_WIDTH + src_x) * 3);
+        }
+    }
+    Serial.println("[LUT] Pre-computed 96x96 center-crop resize lookup table in RAM.");
+}
+
+// ----------------------------------------------------------------------------
 // Setup Function
 // ----------------------------------------------------------------------------
 void setup() {
@@ -1393,6 +1500,30 @@ void setup() {
         Serial.println("[CRITICAL ERROR] Insufficient memory for JPEG staging buffer!");
     } else {
         Serial.printf("[MEMORY] Allocated %u KB JPEG staging buffer successfully.\n", MAX_JPEG_BUF_SIZE / 1024);
+    }
+
+    // Allocate ai_input_buf (96 * 96 * 3 = 27,648 bytes) in Fast Internal SRAM
+    size_t ai_buf_size = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT * 3;
+    ai_input_buf = (uint8_t*)heap_caps_malloc(ai_buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!ai_input_buf) {
+        ai_input_buf = (uint8_t*)ps_malloc(ai_buf_size);
+    }
+    if (ai_input_buf) {
+        Serial.printf("[MEMORY] Allocated %u KB AI input buffer in fast Internal SRAM.\n", ai_buf_size / 1024);
+    } else {
+        Serial.println("[CRITICAL ERROR] Insufficient memory for AI input buffer!");
+    }
+
+    // Allocate resize_lut (96 * 96 * sizeof(uint32_t) = 36,864 bytes)
+    size_t lut_size = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT * sizeof(uint32_t);
+    resize_lut = (uint32_t*)heap_caps_malloc(lut_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!resize_lut) {
+        resize_lut = (uint32_t*)ps_malloc(lut_size);
+    }
+    if (resize_lut) {
+        initResizeLut();
+    } else {
+        Serial.println("[WARNING] Insufficient memory for Resize LUT, will use software fallback.");
     }
 
     // 3. Start Wi-Fi SoftAP FIRST (Guarantees Wi-Fi is NEVER blocked by cold camera)
@@ -1448,11 +1579,12 @@ void setup() {
 // Burst Voting Inference (Temporal Consensus Ensemble)
 // ----------------------------------------------------------------------------
 bool runBurstInference(float override_weight_g) {
-    if (!snapshot_buf || !jpeg_stage_buf) {
-        Serial.println("[ERROR] Cannot infer: Snapshot or staging buffer not allocated.");
+    if (!snapshot_buf || !jpeg_stage_buf || !ai_input_buf) {
+        Serial.println("[ERROR] Cannot infer: Required buffers not allocated.");
         return false;
     }
 
+    g_burst_active = true;
     uint32_t t_burst_start = millis();
     Serial.println("\n=======================================================");
     Serial.printf(" [BURST INFERENCE] Capturing %d frames for consensus...\n", BURST_SAMPLE_COUNT);
@@ -1478,6 +1610,7 @@ bool runBurstInference(float override_weight_g) {
                 if (fb->len <= MAX_JPEG_BUF_SIZE) {
                     memcpy(jpeg_stage_buf, fb->buf, fb->len);
                     jpeg_len = fb->len;
+                    g_cached_jpeg_len = fb->len; // Keep live stream cache fresh
                 }
                 esp_camera_fb_return(fb);
             }
@@ -1498,15 +1631,30 @@ bool runBurstInference(float override_weight_g) {
 
         valid_frames++;
 
-        // 2. Crop and interpolate down to 96x96 (runs outside camera mutex)
-        ei::image::processing::crop_and_interpolate_rgb888(
-            snapshot_buf,
-            CAMERA_RAW_WIDTH,
-            CAMERA_RAW_HEIGHT,
-            snapshot_buf,
-            EI_CLASSIFIER_INPUT_WIDTH,
-            EI_CLASSIFIER_INPUT_HEIGHT
-        );
+        // 2. Fast RAM LUT resize: 320x240 RGB888 (PSRAM) -> 96x96 RGB888 into Fast Internal SRAM (~1.5 ms)
+        if (resize_lut) {
+            const size_t total_pixels = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
+            const uint32_t row_stride = CAMERA_RAW_WIDTH * 3;
+            for (size_t p = 0; p < total_pixels; p++) {
+                uint32_t s0 = resize_lut[p];
+                uint32_t s1 = s0 + 3;
+                uint32_t s2 = s0 + row_stride;
+                uint32_t s3 = s2 + 3;
+                size_t dst_idx = p * 3;
+                ai_input_buf[dst_idx]     = (uint8_t)(((uint16_t)snapshot_buf[s0]     + snapshot_buf[s1]     + snapshot_buf[s2]     + snapshot_buf[s3]     + 2) >> 2);
+                ai_input_buf[dst_idx + 1] = (uint8_t)(((uint16_t)snapshot_buf[s0 + 1] + snapshot_buf[s1 + 1] + snapshot_buf[s2 + 1] + snapshot_buf[s3 + 1] + 2) >> 2);
+                ai_input_buf[dst_idx + 2] = (uint8_t)(((uint16_t)snapshot_buf[s0 + 2] + snapshot_buf[s1 + 2] + snapshot_buf[s2 + 2] + snapshot_buf[s3 + 2] + 2) >> 2);
+            }
+        } else {
+            ei::image::processing::crop_and_interpolate_rgb888(
+                snapshot_buf,
+                CAMERA_RAW_WIDTH,
+                CAMERA_RAW_HEIGHT,
+                ai_input_buf,
+                EI_CLASSIFIER_INPUT_WIDTH,
+                EI_CLASSIFIER_INPUT_HEIGHT
+            );
+        }
 
         // 3. Construct Edge Impulse signal
         ei::signal_t signal;
@@ -1666,9 +1814,9 @@ bool runBurstInference(float override_weight_g) {
         }
 
         unit_price = 50000.0f;
-        if (strcmp(winner_label, "apple") == 0)       unit_price = UNIT_PRICE_APPLE;
-        else if (strcmp(winner_label, "orange") == 0) unit_price = UNIT_PRICE_ORANGE;
-        else if (strcmp(winner_label, "pear") == 0)   unit_price = UNIT_PRICE_PEAR;
+        if (strcmp(winner_label, "apple") == 0)       unit_price = g_price_apple;
+        else if (strcmp(winner_label, "orange") == 0) unit_price = g_price_orange;
+        else if (strcmp(winner_label, "pear") == 0)   unit_price = g_price_pear;
 
         total_price = (weight_g / 1000.0f) * unit_price;
         sanity_ok = (weight_g >= 50.0f && weight_g <= 600.0f);
@@ -1715,25 +1863,33 @@ bool runBurstInference(float override_weight_g) {
 
     // 10. Forward Result to STM32 Master via UART
     if (detected_any) {
-        // Binary framed packet for embedded STM32 parsers
+        // Send 4-field ASCII response for STM32 LCD: RES:<fruit>,<conf>,<weight>,<price>
+        STM32_Serial.printf("\r\nRES:%s,%d,%.1f,%.0f\r\n",
+                            winner_label,
+                            (int)(winner_avg_conf * 100.0f),
+                            weight_g,
+                            total_price);
+
+        // Binary framed packet terminated with newline so it never corrupts the ASCII parser
         STM32_Serial.write(0xAA);
         STM32_Serial.write(winner_label[0]); // 'a'=apple, 'o'=orange, 'p'=pear
         STM32_Serial.write((uint8_t)(winner_avg_conf * 100.0f));
-        STM32_Serial.write(winner_votes); // Send consensus vote count
+        STM32_Serial.write(winner_votes);
         STM32_Serial.write(0x55);
-
-        // Human-readable ASCII string for string-based STM32 firmware
-        STM32_Serial.printf("RES:%s,%d,%.1f\r\n", winner_label, (int)(winner_avg_conf * 100.0f), weight_g);
+        STM32_Serial.write('\n');
 
         vTaskDelay(pdMS_TO_TICKS(15));
         digitalWrite(STATUS_LED_PIN, HIGH);
+    } else {
+        STM32_Serial.printf("\r\nRES:none,0,%.1f,0\r\n", weight_g);
     }
 
+    g_burst_active = false;
     return true;
 }
 
 // ----------------------------------------------------------------------------
-// Signal Callback: Converts RGB888 Snapshot to Edge Impulse Floats
+// Signal Callback: Converts Fast Internal SRAM RGB888 to Edge Impulse Floats
 // ----------------------------------------------------------------------------
 static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
     size_t pixel_ix = offset * 3;
@@ -1741,9 +1897,9 @@ static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
     size_t out_ptr_ix = 0;
 
     while (pixels_left != 0) {
-        out_ptr[out_ptr_ix] = (snapshot_buf[pixel_ix + 2] << 16) +
-                              (snapshot_buf[pixel_ix + 1] << 8) +
-                              snapshot_buf[pixel_ix];
+        out_ptr[out_ptr_ix] = (ai_input_buf[pixel_ix + 2] << 16) +
+                              (ai_input_buf[pixel_ix + 1] << 8) +
+                              ai_input_buf[pixel_ix];
         out_ptr_ix++;
         pixel_ix += 3;
         pixels_left--;
@@ -1821,7 +1977,6 @@ void processStm32Uart() {
             if (s_stm32_rx_len > 0) {
                 s_stm32_rx_buf[s_stm32_rx_len] = '\0';
                 char* str = (char*)s_stm32_rx_buf;
-                // Search for numeric digits (e.g. "W:245.3" or "245.3")
                 char* p = str;
                 while (*p && !isdigit(*p) && *p != '.') p++;
                 if (*p) {
@@ -1832,6 +1987,22 @@ void processStm32Uart() {
                         Serial.printf("\n[STM32 UART] ASCII packet parsed: '%s' -> Live HX711 Mass: %.1f g\n", str, w);
                         s_stm32_rx_len = 0;
                         runBurstInference(w);
+                        return;
+                    } else if (w == 0.0f) {
+                        s_has_live_stm32 = true;
+                        s_last_live_weight_g = 0.0f;
+                        strncpy(g_telemetry.label, "none", sizeof(g_telemetry.label) - 1);
+                        g_telemetry.confidence = 0.0f;
+                        g_telemetry.weight_g = 0.0f;
+                        g_telemetry.unit_price = 0.0f;
+                        g_telemetry.total_price = 0.0f;
+                        g_telemetry.sanity_ok = false;
+                        g_telemetry.detected = false;
+                        g_telemetry.votes = 0;
+                        g_telemetry.stm32_live = true;
+                        digitalWrite(STATUS_LED_PIN, HIGH);
+                        Serial.println("\n[STM32 UART] 'W:0' received -> Scale emptied (Tare reset).");
+                        s_stm32_rx_len = 0;
                         return;
                     }
                 }
@@ -1871,7 +2042,7 @@ void loop() {
 
     if (g_web_trigger_pending) {
         g_web_trigger_pending = false;
-        runBurstInference();
+        runBurstInference(s_has_live_stm32 ? s_last_live_weight_g : -1.0f);
     }
 
     // In continuous mode, run a burst periodically (every 2.5 seconds)

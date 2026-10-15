@@ -80,7 +80,7 @@ class DatasetCollectorApp:
         self.btn_connect.pack(side=tk.LEFT, padx=(0, 8))
 
         self.btn_flash = tk.Button(
-            top_bar, text="💡 Toggle Flash LED", command=self.toggle_flash,
+            top_bar, text="☼ Toggle Flash LED", command=self.toggle_flash,
             bg="#475569", fg="white", font=("Segoe UI", 9), relief=tk.FLAT, padx=10
         )
         self.btn_flash.pack(side=tk.LEFT, padx=(0, 8))
@@ -115,7 +115,7 @@ class DatasetCollectorApp:
 
         # Big Capture Button
         self.btn_capture = tk.Button(
-            action_bar, text="📸 CAPTURE PHOTO  [Spacebar]",
+            action_bar, text="● CAPTURE PHOTO  [Spacebar]",
             command=self.capture_manual,
             bg="#16a34a", fg="white", font=("Segoe UI", 12, "bold"),
             relief=tk.FLAT, height=2, cursor="hand2"
@@ -172,7 +172,7 @@ class DatasetCollectorApp:
         self.stats_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
         # Refresh stats button
-        btn_refresh = tk.Button(right_col, text="🔄 Refresh Counts", command=self.refresh_stats, bg="#334155", fg="#cbd5e1", font=("Segoe UI", 8), relief=tk.FLAT)
+        btn_refresh = tk.Button(right_col, text="↻ Refresh Counts", command=self.refresh_stats, bg="#334155", fg="#cbd5e1", font=("Segoe UI", 8), relief=tk.FLAT)
         btn_refresh.pack(fill=tk.X)
 
         # Status Bar at bottom
