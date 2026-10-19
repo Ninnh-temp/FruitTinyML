@@ -3,38 +3,47 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Cân Thông Minh AI - Edge Retail Scale</title>
+  <title>Cân Thông Minh AI - Smart Grocer POS</title>
   <style>
     :root {
       --bg: #090d14;
-      --panel: #111722;
-      --panel-tint: #161f2e;
-      --subtle: #1c2738;
+      --panel: rgba(17, 23, 34, 0.88);
+      --panel-solid: #111722;
+      --panel-tint: rgba(22, 31, 46, 0.75);
+      --subtle: rgba(255, 255, 255, 0.05);
       --text: #f8fafc;
-      --text-muted: #8b99ad;
-      --text-dim: #4b586d;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
       --accent: #38bdf8;
-      --accent-glow: rgba(56, 189, 248, 0.2);
+      --accent-glow: rgba(56, 189, 248, 0.16);
       --green: #22c55e;
       --green-glow: rgba(34, 197, 94, 0.2);
       --amber: #f59e0b;
       --red: #ef4444;
       --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       --font-mono: Consolas, "Cascadia Mono", "Segoe UI Mono", "Roboto Mono", "SF Mono", monospace;
+      --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+      --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    
     body {
       font-family: var(--font-sans);
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
       background: var(--bg);
+      background-image: 
+        radial-gradient(circle at 15% 20%, var(--accent-glow), transparent 35%),
+        radial-gradient(circle at 85% 80%, rgba(34, 197, 94, 0.06), transparent 40%);
+      background-attachment: fixed;
       color: var(--text);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       padding: 14px;
+      transition: background 0.45s var(--ease-spring);
     }
 
     .cockpit {
@@ -71,6 +80,7 @@
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.5px;
+      transition: all 0.45s var(--ease-spring);
     }
     .header-pills {
       display: flex;
@@ -86,6 +96,8 @@
       font-size: 0.75rem;
       font-weight: 600;
       background: var(--panel);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.06);
       color: var(--text-muted);
     }
     .conn-dot {
@@ -94,6 +106,7 @@
       border-radius: 50%;
       background: var(--green);
       box-shadow: 0 0 6px var(--green);
+      transition: all 0.3s ease;
     }
     .pill-btn {
       display: inline-flex;
@@ -104,16 +117,21 @@
       font-size: 0.75rem;
       font-weight: 600;
       background: var(--panel);
+      backdrop-filter: blur(8px);
       border: 1px solid rgba(255, 255, 255, 0.08);
       color: var(--text);
       cursor: pointer;
+      user-select: none;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 2px 5px rgba(0,0,0,0.25);
       transition: all 0.15s ease;
     }
-    .pill-btn:hover { background: var(--panel-tint); }
+    .pill-btn:hover { background: var(--panel-tint); transform: translateY(-1px); }
+    .pill-btn:active { transform: translateY(1px); }
     .pill-btn.active {
       background: rgba(56, 189, 248, 0.15);
       border-color: var(--accent);
       color: var(--accent);
+      box-shadow: 0 0 12px var(--accent-glow);
     }
     .demo-toggle-label {
       cursor: pointer;
@@ -148,12 +166,15 @@
       width: 100%;
       aspect-ratio: 4 / 3;
       background: #020408;
-      border-radius: 14px;
+      border-radius: 16px;
       overflow: hidden;
       display: flex;
       align-items: center;
       justify-content: center;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 14px 36px -12px var(--accent-glow), 0 8px 24px rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      cursor: pointer;
+      transition: all 0.45s var(--ease-spring);
     }
     #cam-feed {
       width: 100%;
@@ -165,15 +186,50 @@
     /* Viewfinder Corner Brackets */
     .bracket {
       position: absolute;
-      width: 20px;
-      height: 20px;
-      border: 2px solid rgba(56, 189, 248, 0.6);
+      width: 22px;
+      height: 22px;
+      border: 2.5px solid var(--accent);
+      filter: drop-shadow(0 0 6px var(--accent-glow));
       pointer-events: none;
+      transition: all 0.45s var(--ease-spring);
     }
-    .br-tl { top: 12px; left: 12px; border-right: none; border-bottom: none; }
-    .br-tr { top: 12px; right: 12px; border-left: none; border-bottom: none; }
-    .br-bl { bottom: 12px; left: 12px; border-right: none; border-top: none; }
-    .br-br { bottom: 12px; right: 12px; border-left: none; border-top: none; }
+    .br-tl { top: 12px; left: 12px; border-right: none; border-bottom: none; border-top-left-radius: 6px; }
+    .br-tr { top: 12px; right: 12px; border-left: none; border-bottom: none; border-top-right-radius: 6px; }
+    .br-bl { bottom: 12px; left: 12px; border-right: none; border-top: none; border-bottom-left-radius: 6px; }
+    .br-br { bottom: 12px; right: 12px; border-left: none; border-top: none; border-bottom-right-radius: 6px; }
+
+    .viewfinder.scanning .bracket {
+      border-color: #ffffff;
+      filter: drop-shadow(0 0 10px var(--accent));
+      animation: bracketPulse 0.9s ease-in-out;
+    }
+    @keyframes bracketPulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.18); }
+    }
+
+    /* Scanning Laser Line */
+    .scan-laser {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, transparent 0%, var(--accent) 25%, #ffffff 50%, var(--accent) 75%, transparent 100%);
+      box-shadow: 0 0 14px var(--accent), 0 0 4px #ffffff;
+      opacity: 0;
+      pointer-events: none;
+      top: 0;
+      z-index: 5;
+    }
+    .scan-laser.scanning {
+      animation: laserSweep 0.9s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    }
+    @keyframes laserSweep {
+      0% { top: 0%; opacity: 0; }
+      15% { opacity: 1; }
+      85% { opacity: 1; }
+      100% { top: 100%; opacity: 0; }
+    }
 
     /* Viewfinder Shutter Flash Effect */
     .shutter-flash {
@@ -182,6 +238,7 @@
       background: white;
       opacity: 0;
       pointer-events: none;
+      z-index: 6;
       transition: opacity 0.25s ease-out;
     }
     .shutter-flash.active { opacity: 0.85; transition: opacity 0.03s ease-in; }
@@ -195,9 +252,10 @@
       display: flex;
       justify-content: space-between;
       pointer-events: none;
+      z-index: 4;
     }
     .hud-tag {
-      background: rgba(9, 13, 20, 0.75);
+      background: rgba(9, 13, 20, 0.78);
       backdrop-filter: blur(8px);
       padding: 4px 10px;
       border-radius: 6px;
@@ -206,6 +264,7 @@
       font-variant-numeric: tabular-nums;
       font-weight: 600;
       color: var(--text-muted);
+      border: 1px solid rgba(255, 255, 255, 0.06);
     }
     .hud-bottom {
       position: absolute;
@@ -216,6 +275,7 @@
       justify-content: space-between;
       align-items: center;
       pointer-events: none;
+      z-index: 4;
     }
     .live-target-badge {
       display: flex;
@@ -228,19 +288,22 @@
       font-size: 0.85rem;
       font-weight: 700;
       color: var(--text);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
     }
 
-    /* Actions Strip */
+    /* Tactile Mechanical Keys (Actions Strip) */
     .action-strip {
       display: grid;
-      grid-template-columns: 2fr 1fr 1fr;
+      grid-template-columns: 1.5fr 1fr;
       gap: 8px;
     }
     .act-btn {
+      position: relative;
       padding: 12px 10px;
-      border-radius: 10px;
-      border: none;
-      background: var(--panel);
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: linear-gradient(180deg, #182232 0%, #101622 100%);
       color: var(--text);
       font-size: 0.86rem;
       font-weight: 600;
@@ -249,20 +312,38 @@
       justify-content: center;
       gap: 6px;
       cursor: pointer;
-      transition: all 0.15s ease;
       user-select: none;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15), 0 4px 10px rgba(0, 0, 0, 0.35);
+      transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.15s ease;
     }
-    .act-btn:hover { background: var(--panel-tint); transform: translateY(-1px); }
-    .act-btn:active { transform: translateY(1px); }
+    .act-btn:hover {
+      background: linear-gradient(180deg, #1e2b3e 0%, #131b2a 100%);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 6px 14px rgba(0, 0, 0, 0.45);
+      transform: translateY(-1px);
+    }
+    .act-btn:active {
+      transform: translateY(2px);
+      box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.2);
+    }
     .act-btn.primary {
-      background: linear-gradient(135deg, #0284c7, #0369a1);
-      color: white;
-      box-shadow: 0 4px 12px rgba(2, 132, 199, 0.35);
+      background: linear-gradient(180deg, rgba(255,255,255,0.18) 0%, transparent 100%), linear-gradient(135deg, #0284c7, #0369a1);
+      border: 1px solid rgba(56, 189, 248, 0.5);
+      color: #ffffff;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 6px 16px rgba(2, 132, 199, 0.4);
     }
-    .act-btn.primary:hover { background: linear-gradient(135deg, #0369a1, #0284c7); }
+    .act-btn.primary:hover {
+      background: linear-gradient(180deg, rgba(255,255,255,0.25) 0%, transparent 100%), linear-gradient(135deg, #0369a1, #0284c7);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 8px 20px rgba(2, 132, 199, 0.5);
+    }
+    .act-btn.primary:active {
+      transform: translateY(2px);
+      box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(2, 132, 199, 0.2);
+    }
     .act-btn.flash-active {
-      background: rgba(245, 158, 11, 0.2);
-      color: #fde68a;
+      background: linear-gradient(180deg, rgba(255,255,255,0.2) 0%, transparent 100%), linear-gradient(135deg, #d97706, #b45309);
+      border: 1px solid rgba(251, 191, 36, 0.6);
+      color: #fffbeb;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 4px 14px rgba(217, 119, 6, 0.45);
     }
 
     /* Right Column: Metrology & Live Telemetry Console */
@@ -273,26 +354,69 @@
       justify-content: space-between;
     }
 
-    /* Top Section: Metrology Hero (Mass + Total Due in VND) */
+    /* Top Section: Metrology Hero (POS Checkout & Digital Receipt) */
     .metrology-block {
-      background: var(--panel);
-      border-radius: 14px;
+      position: relative;
+      background: radial-gradient(circle at 90% 12%, var(--accent-glow) 0%, transparent 65%), var(--panel);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 16px;
       padding: 16px 18px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 10px;
+      box-shadow: 0 16px 36px -12px var(--accent-glow), 0 4px 16px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+      transition: all 0.45s var(--ease-spring);
+      overflow: hidden;
+    }
+    .receipt-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.65rem;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--text-dim);
+      padding-bottom: 2px;
+    }
+    .receipt-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--accent);
+      background: rgba(56, 189, 248, 0.1);
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-weight: 800;
+      transition: all 0.45s var(--ease-spring);
+    }
+    .receipt-serial {
+      font-family: var(--font-mono);
+      color: var(--text-dim);
     }
     .metrology-row-top {
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
+      align-items: center;
     }
     .metrology-title {
       font-size: 0.72rem;
       text-transform: uppercase;
       letter-spacing: 0.8px;
       font-weight: 700;
+      color: var(--text-muted);
+    }
+    .source-pill {
+      font-size: 0.65rem;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
       color: var(--text-dim);
+      padding: 1px 7px;
+      border-radius: 10px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
     }
     .mass-hero-wrap {
       display: flex;
@@ -322,13 +446,20 @@
       text-align: right;
     }
 
+    /* Dashed Receipt Divider Line */
+    .receipt-divider {
+      height: 1px;
+      border: none;
+      border-top: 1.5px dashed rgba(255, 255, 255, 0.12);
+      margin: 4px 0;
+    }
+
     /* Price Breakdown Line (VND) */
     .price-line {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
-      padding-top: 10px;
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      padding-top: 2px;
     }
     .price-total-wrap {
       display: flex;
@@ -342,6 +473,7 @@
       letter-spacing: -0.5px;
       color: var(--accent);
       line-height: 1;
+      transition: color 0.45s var(--ease-spring);
     }
     .price-rate-wrap {
       text-align: right;
@@ -354,17 +486,21 @@
       cursor: pointer;
       text-decoration: underline;
       margin-left: 4px;
+      font-weight: 600;
+      transition: color 0.45s var(--ease-spring);
     }
+    .edit-price-inline:hover { opacity: 0.8; }
 
     /* Non-blocking Inline Price Editor Tray (VND) */
     .price-editor-tray {
       display: none;
       background: #141b26;
       border: 1px solid rgba(56, 189, 248, 0.25);
-      border-radius: 12px;
+      border-radius: 14px;
       padding: 12px 14px;
       flex-direction: column;
       gap: 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
       animation: fadeIn 0.2s ease;
     }
     .price-editor-tray.open { display: flex; }
@@ -385,9 +521,9 @@
     .unit-switch-group {
       display: flex;
       gap: 4px;
-      background: rgba(0, 0, 0, 0.3);
+      background: rgba(0, 0, 0, 0.35);
       padding: 2px;
-      border-radius: 6px;
+      border-radius: 8px;
     }
     .unit-opt-btn {
       padding: 3px 8px;
@@ -396,12 +532,14 @@
       border: none;
       background: none;
       color: var(--text-dim);
-      border-radius: 4px;
+      border-radius: 6px;
       cursor: pointer;
+      transition: all 0.15s ease;
     }
     .unit-opt-btn.selected {
       background: var(--accent);
       color: #0b0f17;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
     }
     .price-inputs-grid {
       display: grid;
@@ -413,11 +551,12 @@
     }
     .price-card {
       background: rgba(255, 255, 255, 0.02);
-      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 10px;
       padding: 8px 10px;
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 6px;
     }
     .price-card-label {
       font-size: 0.75rem;
@@ -432,27 +571,31 @@
       gap: 4px;
     }
     .step-btn {
-      width: 26px;
-      height: 26px;
-      border-radius: 6px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      background: var(--panel);
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: linear-gradient(180deg, #1c2738 0%, #131c2a 100%);
       color: var(--text);
-      font-size: 0.95rem;
+      font-size: 1rem;
       font-weight: 700;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
+      user-select: none;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 2px 4px rgba(0, 0, 0, 0.3);
+      transition: all 0.12s ease;
     }
-    .step-btn:hover { background: var(--panel-tint); }
+    .step-btn:hover { background: #223247; transform: translateY(-1px); }
+    .step-btn:active { transform: translateY(1px); box-shadow: inset 0 1px 3px rgba(0,0,0,0.4); }
     .price-input-box {
       flex: 1;
       width: 100%;
       min-width: 50px;
       background: #090d14;
       border: 1px solid rgba(255, 255, 255, 0.15);
-      border-radius: 6px;
+      border-radius: 7px;
       color: var(--text);
       font-family: var(--font-sans);
       font-variant-numeric: tabular-nums;
@@ -460,6 +603,11 @@
       font-weight: 700;
       padding: 4px 6px;
       text-align: center;
+      transition: border-color 0.15s ease;
+    }
+    .price-input-box:focus {
+      outline: none;
+      border-color: var(--accent);
     }
     .price-tray-footer {
       display: flex;
@@ -481,35 +629,65 @@
       align-items: center;
       justify-content: space-between;
       background: var(--panel);
-      border-radius: 12px;
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
       padding: 12px 14px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.25);
     }
     .fruit-info-left {
       display: flex;
       align-items: center;
       gap: 10px;
     }
-    .fruit-icon { font-size: 1.5rem; line-height: 1; }
+    .fruit-icon {
+      font-size: 1.55rem;
+      line-height: 1;
+      display: inline-block;
+      user-select: none;
+    }
     .fruit-name { font-size: 1rem; font-weight: 700; }
     .fruit-consensus-txt { font-size: 0.74rem; color: var(--text-muted); }
-    .sanity-tag {
-      font-size: 0.75rem;
-      font-weight: 700;
-      padding: 4px 10px;
-      border-radius: 6px;
-    }
-    .sanity-pass { background: rgba(34, 197, 94, 0.15); color: var(--green); }
-    .sanity-idle { background: rgba(255, 255, 255, 0.05); color: var(--text-dim); }
-    .sanity-fail { background: rgba(239, 68, 68, 0.15); color: var(--red); }
 
-    /* Live Telemetry Grid (Visible alongside - watch live as AI triggers!) */
+
+    /* Fruit Bounce/Pop Animation */
+    @keyframes fruitPop {
+      0% { transform: scale(0.65) rotate(-6deg); opacity: 0.5; }
+      50% { transform: scale(1.28) rotate(5deg); opacity: 1; }
+      75% { transform: scale(0.92) rotate(-2deg); }
+      100% { transform: scale(1) rotate(0deg); opacity: 1; }
+    }
+    .fruit-pop {
+      animation: fruitPop 0.5s var(--ease-bounce) forwards;
+    }
+
+    /* Mini Temporal Consensus Bar */
+    .consensus-bar-wrap {
+      width: 100%;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 3px;
+    }
+    .consensus-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--green));
+      width: 0%;
+      transition: width 0.3s ease, background 0.45s var(--ease-spring);
+    }
+
+    /* Live Telemetry Grid */
     .telemetry-block {
       background: var(--panel);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 14px;
       padding: 14px 16px;
       display: flex;
       flex-direction: column;
       gap: 10px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.25);
     }
     .telem-header {
       display: flex;
@@ -532,6 +710,7 @@
       display: flex;
       align-items: center;
       gap: 4px;
+      transition: color 0.45s var(--ease-spring);
     }
 
     /* Telemetry 2x3 Compact Grid */
@@ -545,15 +724,17 @@
     }
     .telem-cell {
       background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.04);
       border-radius: 8px;
       padding: 8px 10px;
       display: flex;
       flex-direction: column;
       gap: 2px;
-      transition: background 0.3s ease;
+      transition: background 0.3s ease, border-color 0.3s ease;
     }
     .telem-cell.flash-update {
-      background: rgba(56, 189, 248, 0.15);
+      background: rgba(56, 189, 248, 0.16);
+      border-color: var(--accent);
     }
     .telem-k {
       font-size: 0.68rem;
@@ -567,22 +748,6 @@
       font-size: 0.88rem;
       font-weight: 700;
       color: var(--text);
-    }
-
-    /* Mini Temporal Consensus Bar */
-    .consensus-bar-wrap {
-      width: 100%;
-      height: 4px;
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 2px;
-      overflow: hidden;
-      margin-top: 2px;
-    }
-    .consensus-bar-fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--accent), var(--green));
-      width: 0%;
-      transition: width 0.3s ease;
     }
 
     /* Footer */
@@ -626,8 +791,9 @@
         <div class="viewfinder" onclick="triggerInference()">
           <img id="cam-feed" src="/capture" alt="Camera Stream" onerror="handleImageError()">
           <div class="shutter-flash" id="shutter-fx"></div>
+          <div class="scan-laser" id="scan-laser"></div>
 
-          <!-- Viewfinder Brackets -->
+          <!-- Viewfinder Corner Brackets -->
           <div class="bracket br-tl"></div>
           <div class="bracket br-tr"></div>
           <div class="bracket br-bl"></div>
@@ -659,19 +825,22 @@
             <span>💡</span>
             <span id="lbl-flash">Đèn Flash</span>
           </button>
-          <button class="act-btn" onclick="cycleWeight()">
-            <span>⚖️</span>
-            <span>Đổi Khối Lượng</span>
-          </button>
         </div>
       </div>
 
       <!-- Right Column: Metrology Readout & Live Telemetry Console (VND) -->
       <div class="console-col">
-        <!-- Metrology Primary Block -->
+        <!-- Metrology Primary Block (POS Digital Receipt) -->
         <div class="metrology-block">
+          <div class="receipt-header">
+            <span class="receipt-badge">POS CHECKOUT</span>
+            <span class="receipt-serial">TICKET #711</span>
+          </div>
           <div class="metrology-row-top">
-            <span class="metrology-title">Khối lượng cân (Mass)</span>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span class="metrology-title">Khối lượng cân (Mass)</span>
+              <span class="source-pill" id="val-source-pill">STM32 HX711</span>
+            </div>
             <span class="mass-kg-sub" id="val-mass-kg">0,000 kg</span>
           </div>
           <div class="mass-hero-wrap">
@@ -679,6 +848,8 @@
             <span class="mass-unit">g</span>
           </div>
           
+          <div class="receipt-divider"></div>
+
           <div class="price-line">
             <div class="price-total-wrap">
               <span class="metrology-title">Thành tiền (VND)</span>
@@ -755,7 +926,6 @@
               </div>
             </div>
           </div>
-          <span class="sanity-tag sanity-idle" id="sanity-pill">ĐÃ BÌ (TARE)</span>
         </div>
 
         <!-- Live Telemetry Grid (Visible alongside - watch live as AI triggers!) -->
@@ -807,6 +977,15 @@
     let flashActive = false;
     let demoIndex = 0;
     let priceUnit = 'kg'; // 'kg', '100g', 'g'
+    let prevFruitLabel = '';
+
+    // Chameleon Color Themes
+    const THEMES = {
+      apple:  { accent: '#fb7185', glow: 'rgba(251, 113, 133, 0.22)' },
+      orange: { accent: '#fb923c', glow: 'rgba(251, 146, 60, 0.22)' },
+      pear:   { accent: '#a3e635', glow: 'rgba(163, 230, 53, 0.22)' },
+      none:   { accent: '#38bdf8', glow: 'rgba(56, 189, 248, 0.16)' }
+    };
 
     // Default prices per kg in VND
     const DEFAULT_PRICES = {
@@ -831,10 +1010,10 @@
     };
 
     const DEMO_SAMPLES = [
-      { label: "apple", confidence: 0.945, weight: 218.4, votes: 4, dsp_ms: 8, infer_ms: 42, temp: 48.2, psram_kb: 3840, heap_kb: 172 },
-      { label: "orange", confidence: 0.892, weight: 184.2, votes: 4, dsp_ms: 9, infer_ms: 41, temp: 48.6, psram_kb: 3840, heap_kb: 171 },
-      { label: "pear", confidence: 0.961, weight: 235.8, votes: 4, dsp_ms: 8, infer_ms: 44, temp: 49.1, psram_kb: 3840, heap_kb: 170 },
-      { label: "none", confidence: 0.000, weight: 0.0, votes: 0, dsp_ms: 8, infer_ms: 39, temp: 47.9, psram_kb: 3840, heap_kb: 174 }
+      { label: "apple", confidence: 0.945, weight: 218.4, votes: 4, dsp_ms: 8, infer_ms: 42, temp: 48.2, psram_kb: 3840, heap_kb: 172, stm32_live: true },
+      { label: "orange", confidence: 0.892, weight: 184.2, votes: 4, dsp_ms: 9, infer_ms: 41, temp: 48.6, psram_kb: 3840, heap_kb: 171, stm32_live: true },
+      { label: "pear", confidence: 0.961, weight: 235.8, votes: 4, dsp_ms: 8, infer_ms: 44, temp: 49.1, psram_kb: 3840, heap_kb: 170, stm32_live: true },
+      { label: "none", confidence: 0.000, weight: 0.0, votes: 0, dsp_ms: 8, infer_ms: 39, temp: 47.9, psram_kb: 3840, heap_kb: 174, stm32_live: true }
     ];
 
     let currentTelemetry = DEMO_SAMPLES[demoIndex];
@@ -915,13 +1094,15 @@
 
     function savePrices() {
       try { localStorage.setItem('scale_prices_vnd_kg', JSON.stringify(customPrices)); } catch(e){}
+      if (!isDemoMode) {
+        fetch(`/set_prices?apple=${customPrices.apple}&orange=${customPrices.orange}&pear=${customPrices.pear}`).catch(() => {});
+      }
     }
 
     function createSvgView(label) {
-      const colors = { apple: "#ef4444", orange: "#f97316", pear: "#84cc16", none: "#334155" };
-      const c = colors[label] || "#334155";
+      const c = (THEMES[label] ? THEMES[label].accent : '#38bdf8');
       const icon = FRUITS[label] ? FRUITS[label].emoji : "⚖️";
-      return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" fill="%23020408"/><circle cx="160" cy="120" r="52" fill="${encodeURIComponent(c)}" opacity="0.3"/><circle cx="160" cy="120" r="38" fill="${encodeURIComponent(c)}" opacity="0.75"/><text x="160" y="132" font-size="38" text-anchor="middle" font-family="sans-serif">${encodeURIComponent(icon)}</text></svg>`;
+      return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" fill="%23020408"/><circle cx="160" cy="120" r="54" fill="${encodeURIComponent(c)}" opacity="0.25"/><circle cx="160" cy="120" r="40" fill="${encodeURIComponent(c)}" opacity="0.75"/><text x="160" y="133" font-size="38" text-anchor="middle" font-family="sans-serif">${encodeURIComponent(icon)}</text></svg>`;
     }
 
     let lastFrameTime = performance.now();
@@ -970,17 +1151,36 @@
 
     function renderData(d) {
       currentTelemetry = d;
-      const label = (d.label || "none").toLowerCase();
+      const rawLabel = (d.label || "none").toLowerCase();
+      const isFruit = (rawLabel === "apple" || rawLabel === "orange" || rawLabel === "pear");
+      const label = isFruit ? rawLabel : "none";
       const meta = FRUITS[label] || FRUITS["none"];
-      const isFruit = (label !== "none" && label !== "empty_scale");
       const massG = d.weight > 0 ? d.weight : 0.0;
+
+      // 1. Reactive Fruit Chameleon Theming
+      const theme = THEMES[label] || THEMES.none;
+      document.documentElement.style.setProperty('--accent', theme.accent);
+      document.documentElement.style.setProperty('--accent-glow', theme.glow);
+
+      // 2. Fruit Pop Animation on Class Change
+      if (rawLabel !== prevFruitLabel) {
+        prevFruitLabel = rawLabel;
+        const emojiEls = [document.getElementById('fruit-emoji'), document.getElementById('target-icon')];
+        emojiEls.forEach(el => {
+          if (el) {
+            el.classList.remove('fruit-pop');
+            void el.offsetWidth;
+            el.classList.add('fruit-pop');
+          }
+        });
+      }
 
       // Base price in VND/kg
       const basePricePerKg = isFruit ? (customPrices[label] || DEFAULT_PRICES[label] || 60000) : 0;
       const displayRate = convertRateForUnit(basePricePerKg, priceUnit);
       const totalDue = (massG / 1000.0) * basePricePerKg;
 
-      // 1. Metrology Numbers
+      // 3. Metrology Numbers
       document.getElementById('val-mass').innerText = massG.toFixed(1);
       document.getElementById('val-mass-kg').innerText = (massG / 1000.0).toFixed(3).replace('.', ',') + " kg";
       document.getElementById('val-total').innerText = totalDue > 0 ? formatVND(totalDue) : "0 ₫";
@@ -990,7 +1190,13 @@
         `Đơn giá: ${formatVND(displayRate)} ${rateSuffix} <span class="edit-price-inline" onclick="togglePriceMenu()">[Sửa]</span>`;
       document.getElementById('val-tare-state').innerText = isFruit ? "Cảm biến khối lượng đang đo" : "Đã trừ bì (Tare 0g)";
 
-      // 2. Viewfinder HUD
+      const srcPill = document.getElementById('val-source-pill');
+      if (srcPill) {
+        srcPill.innerText = d.stm32_live ? "STM32 HX711 •" : "STM32 HX711";
+        srcPill.style.color = d.stm32_live ? "var(--green)" : "var(--text-dim)";
+      }
+
+      // 4. Viewfinder HUD
       document.getElementById('target-icon').innerText = meta.emoji;
       document.getElementById('target-name').innerText = isFruit ? meta.name : "Đang quét đĩa cân...";
       document.getElementById('target-conf').innerText = isFruit ? (d.confidence * 100).toFixed(0) + "%" : "--";
@@ -1000,10 +1206,10 @@
         document.getElementById('cam-fps-hud').innerText = fps + " FPS";
       }
 
-      // 3. Fruit Variety & Consensus
+      // 5. Fruit Variety & Consensus
       document.getElementById('fruit-emoji').innerText = meta.emoji;
       document.getElementById('fruit-title').innerText = isFruit ? meta.name : "Cân trống";
-      const votes = d.votes || (isFruit ? 4 : 0);
+      const votes = d.votes !== undefined ? d.votes : (isFruit ? 4 : 0);
       const burstTotal = d.burst_total || 4;
       const pct = Math.round((votes / burstTotal) * 100);
       document.getElementById('fruit-sub').innerText = isFruit 
@@ -1011,20 +1217,8 @@
         : "Đĩa cân trống • Sẵn sàng đặt quả";
       document.getElementById('consensus-bar').style.width = isFruit ? pct + "%" : "0%";
 
-      // Sanity pill
-      const sanityPill = document.getElementById('sanity-pill');
-      if (!isFruit) {
-        sanityPill.className = "sanity-tag sanity-idle";
-        sanityPill.innerText = "ĐÃ BÌ (TARE)";
-      } else if (massG >= 50 && massG <= 600) {
-        sanityPill.className = "sanity-tag sanity-pass";
-        sanityPill.innerText = "HỢP LỆ";
-      } else {
-        sanityPill.className = "sanity-tag sanity-fail";
-        sanityPill.innerText = "SAI PHẠM VI";
-      }
 
-      // 4. Live Telemetry
+      // 6. Live Telemetry
       document.getElementById('t-infer').innerText = (d.infer_ms || 42) + " ms";
       document.getElementById('t-dsp').innerText = (d.dsp_ms || 8) + " ms";
       document.getElementById('t-fps').innerText = fps + " FPS";
@@ -1065,10 +1259,26 @@
     }
 
     function triggerInference() {
+      // 1. Shutter Flash
       const fx = document.getElementById('shutter-fx');
       fx.classList.add('active');
       setTimeout(() => fx.classList.remove('active'), 120);
 
+      // 2. Scanning Laser & Bracket Pulse
+      const vf = document.querySelector('.viewfinder');
+      const laser = document.getElementById('scan-laser');
+      if (laser) {
+        laser.classList.remove('scanning');
+        void laser.offsetWidth;
+        laser.classList.add('scanning');
+        setTimeout(() => laser.classList.remove('scanning'), 950);
+      }
+      if (vf) {
+        vf.classList.add('scanning');
+        setTimeout(() => vf.classList.remove('scanning'), 950);
+      }
+
+      // 3. Telemetry Cell Update Flash
       const cells = document.querySelectorAll('.telem-cell');
       cells.forEach(c => c.classList.add('flash-update'));
       setTimeout(() => cells.forEach(c => c.classList.remove('flash-update')), 350);
@@ -1091,17 +1301,9 @@
       if (!isDemoMode) fetch('/flash').catch(() => {});
     }
 
-    function cycleWeight() {
-      if (isDemoMode) {
-        demoIndex = (demoIndex + 1) % DEMO_SAMPLES.length;
-        renderData(DEMO_SAMPLES[demoIndex]);
-      } else {
-        fetch('/cycle_weight').then(poll).catch(() => {});
-      }
-    }
-
     // Init
     syncPriceInputs();
+    savePrices();
     setInterval(poll, 350);
     poll();
     updateFrame();

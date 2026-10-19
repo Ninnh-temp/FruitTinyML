@@ -1,0 +1,1551 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Cân Thông Minh AI - Smart Grocer POS Cockpit</title>
+  <style>
+    /* ==========================================================================
+       Catppuccin Theme Engine (Mocha 🌙 vs. Latte Daylight ☀️)
+       ========================================================================== */
+    :root {
+      /* Catppuccin Mocha (Night Default) */
+      --bg: #11111b;          /* Crust */
+      --mantle: #181825;
+      --panel: #1e1e2e;       /* Base */
+      --panel-tint: #25273a;
+      --panel-surface: #313244; /* Surface0 */
+      --border-color: rgba(137, 180, 250, 0.28);
+      --text: #cdd6f4;        /* Text */
+      --text-muted: #a6adc8;  /* Subtext0 */
+      --text-dim: #6c7086;    /* Overlay0 */
+      --key-shadow: #09090f;
+      --dot-color: rgba(108, 112, 134, 0.22);
+
+      /* Chameleon Fruit Accents (Dynamic) */
+      --accent: #89b4fa;      /* Blue (Standby) */
+      --accent-glow: rgba(137, 180, 250, 0.22);
+      --green: #a6e3a1;
+      --green-glow: rgba(166, 227, 161, 0.22);
+      --amber: #f9e2af;
+      --red: #f38ba8;
+      --mauve: #cba6f7;
+      --peach: #fab387;
+
+      --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: "JetBrains Mono", "Fira Code", Consolas, "Cascadia Mono", "Segoe UI Mono", monospace;
+      --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+      --ease-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    [data-theme="day"] {
+      /* Catppuccin Latte (Daylight Warm) */
+      --bg: #dce0e8;          /* Crust / Mantle */
+      --mantle: #e6e9ef;
+      --panel: #eff1f5;       /* Base */
+      --panel-tint: #e6e9ef;
+      --panel-surface: #ccd0da; /* Surface0 */
+      --border-color: rgba(30, 102, 245, 0.25);
+      --text: #4c4f69;        /* Text */
+      --text-muted: #5c5f77;  /* Subtext0 */
+      --text-dim: #8c8fa1;    /* Overlay0 */
+      --key-shadow: #bcc0cc;
+      --dot-color: rgba(140, 143, 161, 0.3);
+
+      --accent: #1e66f5;      /* Sapphire / Blue */
+      --accent-glow: rgba(30, 102, 245, 0.18);
+      --green: #40a02b;
+      --green-glow: rgba(64, 160, 43, 0.2);
+      --amber: #df8e1d;
+      --red: #d20f39;
+      --mauve: #8839ef;
+      --peach: #fe640b;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+    body {
+      font-family: var(--font-mono);
+      background-color: var(--bg);
+      background-image: radial-gradient(var(--dot-color) 1.5px, transparent 1.5px);
+      background-size: 18px 18px;
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 14px;
+      transition: background-color 0.4s ease, color 0.4s ease;
+    }
+
+    .cockpit {
+      width: 100%;
+      max-width: 1080px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    /* ==========================================================================
+       Header Bar
+       ========================================================================== */
+    .header-bar {
+      width: 100%;
+      background: var(--panel);
+      border: 2px solid var(--border-color);
+      border-radius: 14px;
+      padding: 8px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+      backdrop-filter: blur(12px);
+      transition: all 0.3s ease;
+    }
+    .brand-title {
+      font-size: 1.1rem;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .brand-badge {
+      font-size: 0.65rem;
+      background: rgba(137, 180, 250, 0.15);
+      color: var(--accent);
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border: 1px solid var(--border-color);
+      transition: all 0.3s ease;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    /* Tactile 3D Keycap Buttons */
+    .pill-btn {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 9px;
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      background: var(--panel-tint);
+      border: 1.5px solid var(--border-color);
+      border-bottom: 3.5px solid var(--key-shadow);
+      color: var(--text);
+      cursor: pointer;
+      user-select: none;
+      transform: translateY(0);
+      box-shadow: 0 3px 6px rgba(0,0,0,0.25);
+      transition: transform 0.1s var(--ease-spring), border-bottom-width 0.1s ease, background 0.2s ease, border-color 0.2s ease;
+    }
+    .pill-btn:hover {
+      transform: translateY(-2px);
+      border-bottom-width: 5px;
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .pill-btn:active {
+      transform: translateY(2px);
+      border-bottom-width: 1.5px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    }
+    .pill-btn.active {
+      background: rgba(137, 180, 250, 0.15);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 9px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      background: var(--mantle);
+      border: 1.5px solid var(--border-color);
+      color: var(--text-muted);
+    }
+    .conn-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
+      transition: all 0.3s ease;
+    }
+    .demo-toggle-label {
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--text-dim);
+      user-select: none;
+    }
+    .demo-toggle-label input { cursor: pointer; accent-color: var(--accent); }
+
+    /* ==========================================================================
+       Tiled Cockpit Window Grid
+       ========================================================================== */
+    .cockpit-grid {
+      display: grid;
+      grid-template-columns: 1.18fr 1fr;
+      gap: 16px;
+      align-items: stretch;
+    }
+    @media (max-width: 840px) {
+      .cockpit-grid { grid-template-columns: 1fr; gap: 14px; }
+    }
+
+    /* Common Cockpit Window Styling */
+    .tiled-window {
+      background: var(--panel);
+      border: 2px solid var(--border-color);
+      border-radius: 14px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+      transition: transform 0.35s var(--ease-spring), border-color 0.35s ease, box-shadow 0.35s ease;
+    }
+    .tiled-window:hover {
+      transform: translateY(-2px);
+    }
+    .tiled-window.accent-border {
+      border-color: var(--accent);
+      box-shadow: 0 0 20px var(--accent-glow), 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    /* Monospace Terminal Window Title Bar */
+    .win-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 12px;
+      background: var(--mantle);
+      border-bottom: 1.5px solid var(--border-color);
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      user-select: none;
+      transition: border-color 0.3s ease;
+    }
+    .win-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .win-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .dot-close { background: var(--red); }
+    .dot-min { background: var(--amber); }
+    .dot-max { background: var(--green); }
+    .win-title-text {
+      letter-spacing: 0.4px;
+      color: var(--text);
+    }
+    .win-tag {
+      font-size: 0.65rem;
+      background: var(--panel-tint);
+      border: 1px solid var(--border-color);
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: var(--text-dim);
+    }
+
+    /* Left Column: Viewfinder & Controls */
+    .monitor-col {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .viewfinder {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      background: #020408;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    #cam-feed {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    /* CRT Scanline Texture Overlay */
+    .crt-scanlines {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.35) 50%);
+      background-size: 100% 4px;
+      z-index: 3;
+      pointer-events: none;
+      opacity: 0.55;
+    }
+
+    /* Camera Viewfinder Glowing Corner Brackets */
+    .bracket {
+      position: absolute;
+      width: 28px;
+      height: 28px;
+      border: 3.5px solid var(--accent);
+      filter: drop-shadow(0 0 10px var(--accent-glow));
+      pointer-events: none;
+      z-index: 4;
+      transition: all 0.35s var(--ease-spring);
+    }
+    .br-tl { top: 12px; left: 12px; border-right: none; border-bottom: none; border-top-left-radius: 6px; }
+    .br-tr { top: 12px; right: 12px; border-left: none; border-bottom: none; border-top-right-radius: 6px; }
+    .br-bl { bottom: 12px; left: 12px; border-right: none; border-top: none; border-bottom-left-radius: 6px; }
+    .br-br { bottom: 12px; right: 12px; border-left: none; border-top: none; border-bottom-right-radius: 6px; }
+
+    .viewfinder.scanning .bracket {
+      border-color: #ffffff;
+      filter: drop-shadow(0 0 12px var(--accent));
+      animation: bracketPulse 0.8s ease-in-out;
+    }
+    @keyframes bracketPulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.18); }
+    }
+
+    /* AI Horizontal Scanning Laser Bar */
+    .ai-scan-laser {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, transparent 0%, var(--accent) 25%, #ffffff 50%, var(--accent) 75%, transparent 100%);
+      box-shadow: 0 0 16px var(--accent), 0 0 6px #ffffff;
+      opacity: 0;
+      pointer-events: none;
+      top: 0;
+      z-index: 5;
+    }
+    .ai-scan-laser.scanning {
+      animation: laserSweep 0.8s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    }
+    @keyframes laserSweep {
+      0% { top: 0%; opacity: 0; }
+      15% { opacity: 1; }
+      85% { opacity: 1; }
+      100% { top: 100%; opacity: 0; }
+    }
+
+    /* Shutter Flash */
+    .shutter-flash {
+      position: absolute;
+      inset: 0;
+      background: white;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 6;
+      transition: opacity 0.25s ease-out;
+    }
+    .shutter-flash.active { opacity: 0.85; transition: opacity 0.03s ease-in; }
+
+    /* Viewfinder HUD Overlays - Inset to ensure corner brackets are completely visible */
+    .hud-top {
+      position: absolute;
+      top: 16px;
+      left: 52px;
+      right: 52px;
+      display: flex;
+      justify-content: space-between;
+      pointer-events: none;
+      z-index: 5;
+    }
+    .hud-tag {
+      background: rgba(17, 17, 27, 0.85);
+      backdrop-filter: blur(8px);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+      color: var(--text-muted);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    }
+    .hud-bottom {
+      position: absolute;
+      bottom: 16px;
+      left: 52px;
+      right: 52px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      pointer-events: none;
+      z-index: 5;
+    }
+    .live-target-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(17, 17, 27, 0.9);
+      backdrop-filter: blur(10px);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--text);
+      border: 1.5px solid var(--border-color);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    }
+
+    /* Action Mechanical Keys */
+    .action-strip {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr;
+      gap: 10px;
+    }
+    .act-btn {
+      position: relative;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 2px solid var(--border-color);
+      border-bottom: 4px solid var(--key-shadow);
+      background: var(--panel);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 0.86rem;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+      transform: translateY(0);
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);
+      transition: transform 0.1s var(--ease-spring), border-bottom-width 0.1s ease, background 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .act-btn:hover {
+      transform: translateY(-2px);
+      border-bottom-width: 6px;
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 8px 18px var(--accent-glow);
+    }
+    .act-btn:active {
+      transform: translateY(2px);
+      border-bottom-width: 2px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+    }
+    .act-btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      border-bottom: 4px solid var(--key-shadow);
+      color: #11111b;
+      box-shadow: 0 4px 14px var(--accent-glow);
+    }
+    .act-btn.primary:hover {
+      filter: brightness(1.1);
+      box-shadow: 0 8px 22px var(--accent-glow);
+      color: #11111b;
+    }
+    .act-btn.flash-active {
+      background: var(--amber);
+      border-color: var(--amber);
+      color: #11111b;
+      box-shadow: 0 4px 14px rgba(249, 226, 175, 0.35);
+    }
+
+    /* Right Column: Metrology, Price Tray & Hardware Telemetry */
+    .console-col {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      justify-content: space-between;
+    }
+
+    /* Metrology POS Terminal Window */
+    .metrology-block {
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .metrology-row-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .metrology-title {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      font-weight: 700;
+      color: var(--text-dim);
+    }
+    .source-pill {
+      font-size: 0.65rem;
+      background: var(--mantle);
+      border: 1px solid var(--border-color);
+      color: var(--text-dim);
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-weight: 700;
+    }
+    .mass-hero-wrap {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .mass-val {
+      font-variant-numeric: tabular-nums;
+      font-size: 3.4rem;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -1px;
+      color: var(--text);
+    }
+    .mass-unit {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+    .mass-kg-sub {
+      font-variant-numeric: tabular-nums;
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text-dim);
+      text-align: right;
+    }
+
+    /* Dashed Receipt Line */
+    .receipt-divider {
+      height: 1px;
+      border: none;
+      border-top: 1.5px dashed var(--border-color);
+      margin: 4px 0;
+    }
+
+    .price-line {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding-top: 2px;
+    }
+    .price-total-wrap {
+      display: flex;
+      flex-direction: column;
+    }
+    .price-total-val {
+      font-variant-numeric: tabular-nums;
+      font-size: 2.3rem;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      color: var(--accent);
+      line-height: 1;
+      transition: color 0.35s ease;
+    }
+    .price-rate-wrap {
+      text-align: right;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+    .edit-price-inline {
+      color: var(--accent);
+      font-size: 0.76rem;
+      cursor: pointer;
+      text-decoration: underline;
+      margin-left: 4px;
+      font-weight: 700;
+    }
+
+    /* Spring Pop Animation */
+    @keyframes springPop {
+      0% { transform: scale(0.6) rotate(-8deg); opacity: 0.5; }
+      50% { transform: scale(1.3) rotate(5deg); opacity: 1; }
+      75% { transform: scale(0.9) rotate(-2deg); }
+      100% { transform: scale(1) rotate(0deg); opacity: 1; }
+    }
+    .spring-pop {
+      display: inline-block;
+      animation: springPop 0.5s var(--ease-spring) forwards;
+    }
+
+    /* Price Editor Tray (Non-blocking modal replacement) */
+    .price-editor-tray {
+      display: none;
+      padding: 12px 14px;
+      flex-direction: column;
+      gap: 10px;
+      animation: fadeIn 0.2s ease;
+    }
+    .price-editor-tray.open { display: flex; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .price-tray-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+    .unit-switch-group {
+      display: flex;
+      gap: 4px;
+      background: var(--mantle);
+      padding: 2px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+    }
+    .unit-opt-btn {
+      padding: 3px 8px;
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      border: none;
+      background: none;
+      color: var(--text-dim);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .unit-opt-btn.selected {
+      background: var(--accent);
+      color: var(--bg);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    }
+    .price-inputs-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    @media (max-width: 480px) {
+      .price-inputs-grid { grid-template-columns: 1fr; }
+    }
+    .price-card {
+      background: var(--mantle);
+      border: 1px solid var(--border-color);
+      border-radius: 9px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .price-card-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .price-stepper {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .step-btn {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      border: 1.5px solid var(--border-color);
+      border-bottom: 3px solid var(--key-shadow);
+      background: var(--panel-tint);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      transform: translateY(0);
+      transition: transform 0.1s var(--ease-spring), border-bottom-width 0.1s ease;
+    }
+    .step-btn:hover {
+      transform: translateY(-1px);
+      border-bottom-width: 4px;
+      border-color: var(--accent);
+    }
+    .step-btn:active {
+      transform: translateY(1.5px);
+      border-bottom-width: 1.5px;
+    }
+    .price-input-box {
+      flex: 1;
+      width: 100%;
+      min-width: 50px;
+      background: var(--bg);
+      border: 1.5px solid var(--border-color);
+      border-radius: 7px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      font-size: 0.88rem;
+      font-weight: 700;
+      padding: 4px 6px;
+      text-align: center;
+      outline: none;
+    }
+    .price-input-box:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 8px var(--accent-glow);
+    }
+    .price-tray-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+    }
+    .reset-link {
+      color: var(--text-muted);
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .reset-link:hover { color: var(--accent); }
+
+    /* Fruit Variety Strip */
+    .fruit-line {
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .fruit-info-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .fruit-icon {
+      font-size: 1.6rem;
+      line-height: 1;
+      user-select: none;
+    }
+    .fruit-name {
+      font-size: 0.98rem;
+      font-weight: 800;
+      color: var(--text);
+    }
+    .fruit-consensus-txt {
+      font-size: 0.74rem;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .consensus-bar-wrap {
+      width: 100%;
+      height: 4px;
+      background: var(--mantle);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .consensus-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.3s ease, background-color 0.35s ease;
+    }
+
+
+    /* ==========================================================================
+       Hardware & AI Telemetry Monitor
+       ========================================================================== */
+    .telemetry-block {
+      display: flex;
+      flex-direction: column;
+    }
+    .telem-inner {
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .telem-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    @media (max-width: 480px) {
+      .telem-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .telem-cell {
+      background: var(--mantle);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      transition: background 0.3s ease, border-color 0.3s ease;
+    }
+    .telem-cell.flash-update {
+      background: rgba(137, 180, 250, 0.2);
+      border-color: var(--accent);
+    }
+    .telem-meta-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+    .telem-k {
+      font-size: 0.65rem;
+      color: var(--text-dim);
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .telem-v {
+      font-variant-numeric: tabular-nums;
+      font-size: 0.85rem;
+      font-weight: 800;
+      color: var(--text);
+    }
+    .meter-bar {
+      width: 100%;
+      height: 3px;
+      background: var(--panel-tint);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .meter-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 50%;
+      transition: width 0.35s ease, background 0.35s ease;
+    }
+
+    .telem-footer {
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      text-align: center;
+      padding-top: 4px;
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    footer {
+      text-align: center;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      padding: 6px 0;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="cockpit">
+    <!-- Header Bar -->
+    <header class="header-bar">
+      <div class="brand-title">
+        <span>Cân Thông Minh AI</span>
+        <span class="brand-badge">ESP32 + STM32</span>
+      </div>
+      <div class="header-right">
+        <button class="pill-btn" id="btn-price-menu" onclick="togglePriceMenu()">
+          <span>🏷️</span>
+          <span>Bảng Giá (VND)</span>
+        </button>
+        <button class="pill-btn" id="btn-theme-toggle" onclick="toggleRiceTheme()">
+          <span id="lbl-theme-icon">🌙</span>
+          <span id="lbl-theme-text">Tối</span>
+        </button>
+        <div class="status-pill">
+          <span class="conn-dot" id="conn-dot"></span>
+          <span id="conn-status">SoftAP Live</span>
+        </div>
+        <label class="demo-toggle-label">
+          <input type="checkbox" id="demo-check" onchange="toggleDemo(this.checked)">
+          <span>Mô phỏng</span>
+        </label>
+      </div>
+    </header>
+
+    <!-- Cockpit Main Area: Window Grid -->
+    <div class="cockpit-grid">
+      <!-- Left Column: Viewfinder & Primary Triggers -->
+      <div class="monitor-col">
+        <!-- Viewfinder Tiled Window -->
+        <div class="tiled-window accent-border">
+          <div class="win-titlebar">
+            <div class="win-controls">
+              <span class="win-dot dot-close"></span>
+              <span class="win-dot dot-min"></span>
+              <span class="win-dot dot-max"></span>
+            </div>
+            <div class="win-title-text">Camera Giám Sát (OV2640 • 320x240)</div>
+            <span class="win-tag">CAMERA LIVE</span>
+          </div>
+
+          <div class="viewfinder" onclick="triggerInference()">
+            <img id="cam-feed" src="/capture" alt="Camera Stream" onerror="handleImageError()">
+            <div class="shutter-flash" id="shutter-fx"></div>
+            <div class="crt-scanlines"></div>
+            <div class="ai-scan-laser" id="ai-scan-laser"></div>
+
+            <!-- Viewfinder Brackets -->
+            <div class="bracket br-tl"></div>
+            <div class="bracket br-tr"></div>
+            <div class="bracket br-bl"></div>
+            <div class="bracket br-br"></div>
+
+            <!-- Top HUD -->
+            <div class="hud-top">
+              <div class="hud-tag">FOMO INT8 • 96x96</div>
+              <div class="hud-tag" id="cam-fps-hud">-- FPS</div>
+            </div>
+
+            <!-- Bottom HUD Status -->
+            <div class="hud-bottom">
+              <div class="live-target-badge">
+                <span id="target-icon">⚖️</span>
+                <span id="target-name">Đang quét đĩa cân...</span>
+              </div>
+              <div class="hud-tag" id="target-conf">-- %</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Controls (2-Column Action Strip) -->
+        <div class="action-strip">
+          <button class="act-btn primary" onclick="triggerInference()">
+            <span>⚡</span>
+            <span>Quét Nhận Diện (AI)</span>
+          </button>
+          <button class="act-btn" id="btn-flash" onclick="toggleFlash()">
+            <span>💡</span>
+            <span id="lbl-flash">Đèn Flash</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Right Column: Metrology POS, Price Tray & Telemetry -->
+      <div class="console-col">
+        <!-- Metrology Tiled Window -->
+        <div class="tiled-window accent-border">
+          <div class="win-titlebar">
+            <div class="win-controls">
+              <span class="win-dot dot-close"></span>
+              <span class="win-dot dot-min"></span>
+              <span class="win-dot dot-max"></span>
+            </div>
+            <div class="win-title-text">Bảng Tính Tiền & Cân Khối Lượng (HX711)</div>
+            <span class="win-tag">POS THÀNH TIỀN</span>
+          </div>
+
+          <div class="metrology-block">
+            <div class="metrology-row-top">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="metrology-title">Khối lượng cân</span>
+                <span class="source-pill" id="val-source-pill">STM32 HX711</span>
+              </div>
+              <span class="mass-kg-sub" id="val-mass-kg">0,000 kg</span>
+            </div>
+            <div class="mass-hero-wrap">
+              <span class="mass-val" id="val-mass">0.0</span>
+              <span class="mass-unit">g</span>
+            </div>
+            
+            <div class="receipt-divider"></div>
+
+            <div class="price-line">
+              <div class="price-total-wrap">
+                <span class="metrology-title">Thành tiền</span>
+                <span class="price-total-val" id="val-total">0 ₫</span>
+              </div>
+              <div class="price-rate-wrap">
+                <div id="val-unit-rate">
+                  Đơn giá: 0 ₫ / kg
+                  <span class="edit-price-inline" onclick="togglePriceMenu()">[Sửa]</span>
+                </div>
+                <div style="font-size:0.75rem; color:var(--text-dim);" id="val-tare-state">Đã trừ bì (Tare 0g) • Sensor HX711 sẵn sàng</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Non-Blocking Price Change Tray -->
+        <div class="tiled-window price-editor-tray" id="price-tray">
+          <div class="win-titlebar" style="margin:-12px -14px 10px -14px;">
+            <div class="win-controls">
+              <span class="win-dot dot-close"></span>
+              <span class="win-dot dot-min"></span>
+              <span class="win-dot dot-max"></span>
+            </div>
+            <div class="win-title-text">Cài Đặt Đơn Giá Nhanh (VND)</div>
+            <span class="win-tag">CÀI ĐẶT GIÁ</span>
+          </div>
+
+          <div class="price-tray-header">
+            <span>Cài Đặt Đơn Giá Nhanh (VND)</span>
+            <div class="unit-switch-group">
+              <button class="unit-opt-btn selected" id="unit-kg-btn" onclick="setPriceUnit('kg')">/ kg</button>
+              <button class="unit-opt-btn" id="unit-100g-btn" onclick="setPriceUnit('100g')">/ 100g</button>
+              <button class="unit-opt-btn" id="unit-g-btn" onclick="setPriceUnit('g')">/ g</button>
+            </div>
+          </div>
+
+          <div class="price-inputs-grid">
+            <!-- Apple (Táo) -->
+            <div class="price-card">
+              <span class="price-card-label">🍎 Táo (Apple)</span>
+              <div class="price-stepper">
+                <button class="step-btn" onclick="stepPrice('apple', -1000)">−</button>
+                <input type="number" step="100" min="0" class="price-input-box" id="inp-price-apple" oninput="onCustomPriceChange('apple', this.value)">
+                <button class="step-btn" onclick="stepPrice('apple', 1000)">+</button>
+              </div>
+            </div>
+
+            <!-- Orange (Cam) -->
+            <div class="price-card">
+              <span class="price-card-label">🍊 Cam (Orange)</span>
+              <div class="price-stepper">
+                <button class="step-btn" onclick="stepPrice('orange', -1000)">−</button>
+                <input type="number" step="100" min="0" class="price-input-box" id="inp-price-orange" oninput="onCustomPriceChange('orange', this.value)">
+                <button class="step-btn" onclick="stepPrice('orange', 1000)">+</button>
+              </div>
+            </div>
+
+            <!-- Pear (Lê) -->
+            <div class="price-card">
+              <span class="price-card-label">🍐 Lê (Pear)</span>
+              <div class="price-stepper">
+                <button class="step-btn" onclick="stepPrice('pear', -1000)">−</button>
+                <input type="number" step="100" min="0" class="price-input-box" id="inp-price-pear" oninput="onCustomPriceChange('pear', this.value)">
+                <button class="step-btn" onclick="stepPrice('pear', 1000)">+</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="price-tray-footer">
+            <span>Tự động cập nhật thành tiền tức thì</span>
+            <span class="reset-link" onclick="resetDefaultPrices()">Giá mặc định</span>
+          </div>
+        </div>
+
+        <!-- Detected Fruit Variety Strip -->
+        <div class="tiled-window fruit-line">
+          <div class="fruit-info-left">
+            <span class="fruit-icon" id="fruit-emoji">⚖️</span>
+            <div>
+              <div class="fruit-name" id="fruit-title">Cân trống</div>
+              <div class="fruit-consensus-txt" id="fruit-sub">Đĩa cân trống • Sẵn sàng đặt quả</div>
+              <div class="consensus-bar-wrap">
+                <div class="consensus-bar-fill" id="consensus-bar"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Telemetry Monitor Window -->
+        <div class="tiled-window telemetry-block">
+          <div class="win-titlebar">
+            <div class="win-controls">
+              <span class="win-dot dot-close"></span>
+              <span class="win-dot dot-min"></span>
+              <span class="win-dot dot-max"></span>
+            </div>
+            <div class="win-title-text">Thông Số Phần Cứng & TinyML AI</div>
+            <span class="win-tag" id="telem-live-pill">TRỰC TIẾP ●</span>
+          </div>
+
+          <div class="telem-inner">
+            <div class="telem-grid">
+              <div class="telem-cell" id="c-infer">
+                <div class="telem-meta-row">
+                  <span class="telem-k">AI_LATENCY</span>
+                  <span class="telem-v" id="t-infer">-- ms</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-infer" style="width: 42%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-dsp">
+                <div class="telem-meta-row">
+                  <span class="telem-k">DSP_IMAGE</span>
+                  <span class="telem-v" id="t-dsp">-- ms</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-dsp" style="width: 16%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-fps">
+                <div class="telem-meta-row">
+                  <span class="telem-k">FRAME_RATE</span>
+                  <span class="telem-v" id="t-fps">-- FPS</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-fps" style="width: 66%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-consensus">
+                <div class="telem-meta-row">
+                  <span class="telem-k">VOTES_BURST</span>
+                  <span class="telem-v" id="t-votes">--</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-votes" style="width: 100%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-temp">
+                <div class="telem-meta-row">
+                  <span class="telem-k">DIE_TEMP</span>
+                  <span class="telem-v" id="t-temp">-- °C</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-temp" style="width: 60%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-psram">
+                <div class="telem-meta-row">
+                  <span class="telem-k">PSRAM_FREE</span>
+                  <span class="telem-v" id="t-psram">-- KB</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-psram" style="width: 92%;"></div></div>
+              </div>
+            </div>
+
+            <div class="telem-footer">
+              <span>ESP32-CAM (FOMO INT8) + STM32 (HX711)</span>
+              <span>Bộ nhớ: 4MB PSRAM • SRAM</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer>
+      Hệ Thống Cân Tính Tiền Thông Minh Edge AI • ESP32-CAM (FOMO INT8) & STM32 (HX711)
+    </footer>
+  </div>
+
+  <script>
+    let isLiveConnected = false;
+    let isDemoMode = false;
+    let flashActive = false;
+    let demoIndex = 0;
+    let priceUnit = 'kg'; // 'kg', '100g', 'g'
+    let prevFruitLabel = '';
+    let currentTheme = 'night';
+
+    // Day / Night Catppuccin Palettes
+    const PALETTES = {
+      night: {
+        apple:  { accent: '#f38ba8', glow: 'rgba(243, 139, 168, 0.28)' },
+        orange: { accent: '#fab387', glow: 'rgba(250, 179, 135, 0.28)' },
+        pear:   { accent: '#a6e3a1', glow: 'rgba(166, 227, 161, 0.28)' },
+        none:   { accent: '#89b4fa', glow: 'rgba(137, 180, 250, 0.22)' }
+      },
+      day: {
+        apple:  { accent: '#d20f39', glow: 'rgba(210, 15, 57, 0.25)' },
+        orange: { accent: '#fe640b', glow: 'rgba(254, 100, 11, 0.25)' },
+        pear:   { accent: '#40a02b', glow: 'rgba(64, 160, 43, 0.25)' },
+        none:   { accent: '#1e66f5', glow: 'rgba(30, 102, 245, 0.2)' }
+      }
+    };
+
+    // Load Theme Preference
+    try {
+      const savedTheme = localStorage.getItem('scale_rice_theme');
+      if (savedTheme === 'day') {
+        currentTheme = 'day';
+        document.documentElement.dataset.theme = 'day';
+      }
+    } catch (e) {}
+
+    function updateThemeButton() {
+      const icon = document.getElementById('lbl-theme-icon');
+      const text = document.getElementById('lbl-theme-text');
+      if (currentTheme === 'day') {
+        if (icon) icon.innerText = '☀️';
+        if (text) text.innerText = 'Sáng';
+      } else {
+        if (icon) icon.innerText = '🌙';
+        if (text) text.innerText = 'Tối';
+      }
+    }
+
+    function toggleRiceTheme() {
+      currentTheme = (currentTheme === 'night') ? 'day' : 'night';
+      if (currentTheme === 'day') {
+        document.documentElement.dataset.theme = 'day';
+      } else {
+        delete document.documentElement.dataset.theme;
+      }
+      try { localStorage.setItem('scale_rice_theme', currentTheme); } catch(e){}
+      updateThemeButton();
+      renderData(currentTelemetry);
+    }
+
+    // Default prices per kg in VND
+    const DEFAULT_PRICES = {
+      apple: 60000,
+      orange: 40000,
+      pear: 70000
+    };
+
+    let customPrices = { ...DEFAULT_PRICES };
+    try {
+      const saved = localStorage.getItem('scale_prices_vnd_kg');
+      if (saved) customPrices = JSON.parse(saved);
+      const savedUnit = localStorage.getItem('scale_price_vnd_unit');
+      if (savedUnit) priceUnit = savedUnit;
+    } catch (e) {}
+
+    const FRUITS = {
+      apple: { name: "Táo (Apple)", emoji: "🍎" },
+      orange: { name: "Cam (Orange)", emoji: "🍊" },
+      pear: { name: "Lê (Pear)", emoji: "🍐" },
+      none: { name: "Cân trống", emoji: "⚖️" }
+    };
+
+    const DEMO_SAMPLES = [
+      { label: "apple", confidence: 0.945, weight: 218.4, votes: 4, burst_total: 4, dsp_ms: 8, infer_ms: 42, temp: 48.2, psram_kb: 3840, heap_kb: 172, stm32_live: true },
+      { label: "orange", confidence: 0.892, weight: 184.2, votes: 4, burst_total: 4, dsp_ms: 9, infer_ms: 41, temp: 48.6, psram_kb: 3840, heap_kb: 171, stm32_live: true },
+      { label: "pear", confidence: 0.961, weight: 235.8, votes: 4, burst_total: 4, dsp_ms: 8, infer_ms: 44, temp: 49.1, psram_kb: 3840, heap_kb: 170, stm32_live: true },
+      { label: "none", confidence: 0.000, weight: 0.0, votes: 0, burst_total: 4, dsp_ms: 8, infer_ms: 39, temp: 47.9, psram_kb: 3840, heap_kb: 174, stm32_live: true }
+    ];
+
+    let currentTelemetry = DEMO_SAMPLES[demoIndex];
+
+    function formatVND(val) {
+      return Math.round(val).toLocaleString('vi-VN') + ' ₫';
+    }
+
+    function syncPriceInputs() {
+      ['apple', 'orange', 'pear'].forEach(k => {
+        const inp = document.getElementById('inp-price-' + k);
+        if (inp) {
+          const displayedPrice = convertRateForUnit(customPrices[k], priceUnit);
+          inp.value = Math.round(displayedPrice);
+        }
+      });
+      ['kg', '100g', 'g'].forEach(u => {
+        const btn = document.getElementById('unit-' + u + '-btn');
+        if (btn) btn.classList.toggle('selected', u === priceUnit);
+      });
+    }
+
+    function convertRateForUnit(pricePerKg, unit) {
+      if (unit === 'g') return pricePerKg / 1000.0;
+      if (unit === '100g') return pricePerKg / 10.0;
+      return pricePerKg; // 'kg'
+    }
+
+    function convertToPricePerKg(val, unit) {
+      if (unit === 'g') return val * 1000.0;
+      if (unit === '100g') return val * 10.0;
+      return val;
+    }
+
+    function togglePriceMenu() {
+      const tray = document.getElementById('price-tray');
+      const btn = document.getElementById('btn-price-menu');
+      const isOpen = tray.classList.toggle('open');
+      btn.classList.toggle('active', isOpen);
+      if (isOpen) syncPriceInputs();
+    }
+
+    function setPriceUnit(u) {
+      priceUnit = u;
+      try { localStorage.setItem('scale_price_vnd_unit', u); } catch(e){}
+      syncPriceInputs();
+      renderData(currentTelemetry);
+    }
+
+    function onCustomPriceChange(fruit, val) {
+      const num = parseFloat(val);
+      if (!isNaN(num) && num >= 0) {
+        customPrices[fruit] = convertToPricePerKg(num, priceUnit);
+        savePrices();
+        renderData(currentTelemetry);
+      }
+    }
+
+    function stepPrice(fruit, delta) {
+      const currentRate = convertRateForUnit(customPrices[fruit], priceUnit);
+      let stepDelta = delta;
+      if (priceUnit === '100g') stepDelta = delta / 10.0;
+      if (priceUnit === 'g') stepDelta = Math.max(1, delta / 1000.0);
+      
+      const newRate = Math.max(0, currentRate + stepDelta);
+      customPrices[fruit] = convertToPricePerKg(newRate, priceUnit);
+      savePrices();
+      syncPriceInputs();
+      renderData(currentTelemetry);
+    }
+
+    function resetDefaultPrices() {
+      customPrices = { ...DEFAULT_PRICES };
+      savePrices();
+      syncPriceInputs();
+      renderData(currentTelemetry);
+    }
+
+    function savePrices() {
+      try { localStorage.setItem('scale_prices_vnd_kg', JSON.stringify(customPrices)); } catch(e){}
+      if (!isDemoMode) {
+        fetch(`/set_prices?apple=${customPrices.apple}&orange=${customPrices.orange}&pear=${customPrices.pear}`).catch(() => {});
+      }
+    }
+
+    function createSvgView(label) {
+      const themeSet = PALETTES[currentTheme] || PALETTES.night;
+      const c = (themeSet[label] ? themeSet[label].accent : '#89b4fa');
+      const icon = FRUITS[label] ? FRUITS[label].emoji : "⚖️";
+      const bg = (currentTheme === 'day') ? "%23eff1f5" : "%23020408";
+      return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" fill="${bg}"/><circle cx="160" cy="120" r="54" fill="${encodeURIComponent(c)}" opacity="0.25"/><circle cx="160" cy="120" r="40" fill="${encodeURIComponent(c)}" opacity="0.75"/><text x="160" y="133" font-size="38" text-anchor="middle" font-family="sans-serif">${encodeURIComponent(icon)}</text></svg>`;
+    }
+
+    let lastFrameTime = performance.now();
+    let rollingStreamFps = 12.0;
+
+    function updateFrame() {
+      if (isDemoMode) return;
+      const view = document.getElementById('cam-feed');
+      const img = new Image();
+      img.onload = () => {
+        const now = performance.now();
+        const dt = now - lastFrameTime;
+        lastFrameTime = now;
+        if (dt > 10 && dt < 2000) {
+          rollingStreamFps = (rollingStreamFps * 0.75) + ((1000.0 / dt) * 0.25);
+          document.getElementById('cam-fps-hud').innerText = Math.round(rollingStreamFps) + " FPS";
+        }
+        view.src = img.src;
+        setConnectionState(true);
+        setTimeout(updateFrame, 80);
+      };
+      img.onerror = () => {
+        handleImageError();
+        setTimeout(updateFrame, 1500);
+      };
+      img.src = '/capture?t=' + Date.now();
+    }
+
+    function handleImageError() {
+      if (!isDemoMode) {
+        setConnectionState(false);
+        renderData(DEMO_SAMPLES[demoIndex]);
+      }
+    }
+
+    function poll() {
+      if (isDemoMode) {
+        renderData(DEMO_SAMPLES[demoIndex]);
+        return;
+      }
+      fetch('/status')
+        .then(r => r.json())
+        .then(d => { setConnectionState(true); renderData(d); })
+        .catch(() => { setConnectionState(false); renderData(DEMO_SAMPLES[demoIndex]); });
+    }
+
+    function triggerSpring(el) {
+      if (!el) return;
+      el.classList.remove('spring-pop');
+      void el.offsetWidth;
+      el.classList.add('spring-pop');
+    }
+
+    function renderData(d) {
+      currentTelemetry = d;
+      const rawLabel = (d.label || "none").toLowerCase();
+      const isFruit = (rawLabel === "apple" || rawLabel === "orange" || rawLabel === "pear");
+      const label = isFruit ? rawLabel : "none";
+      const meta = FRUITS[label] || FRUITS["none"];
+      const massG = d.weight > 0 ? d.weight : 0.0;
+
+      // 1. Dynamic Fruit Accent Theming
+      const themeSet = PALETTES[currentTheme] || PALETTES.night;
+      const fruitTheme = themeSet[label] || themeSet.none;
+      document.documentElement.style.setProperty('--accent', fruitTheme.accent);
+      document.documentElement.style.setProperty('--accent-glow', fruitTheme.glow);
+
+      // 2. Spring Physics on Class Change
+      if (rawLabel !== prevFruitLabel) {
+        prevFruitLabel = rawLabel;
+        triggerSpring(document.getElementById('fruit-emoji'));
+        triggerSpring(document.getElementById('target-icon'));
+        triggerSpring(document.getElementById('val-total'));
+      }
+
+      // Base price in VND/kg
+      const basePricePerKg = isFruit ? (customPrices[label] || DEFAULT_PRICES[label] || 60000) : 0;
+      const displayRate = convertRateForUnit(basePricePerKg, priceUnit);
+      const totalDue = (massG / 1000.0) * basePricePerKg;
+
+      // 3. Metrology Readout
+      document.getElementById('val-mass').innerText = massG.toFixed(1);
+      document.getElementById('val-mass-kg').innerText = (massG / 1000.0).toFixed(3).replace('.', ',') + " kg";
+      document.getElementById('val-total').innerText = totalDue > 0 ? formatVND(totalDue) : "0 ₫";
+      
+      const rateSuffix = priceUnit === 'g' ? '/ g' : (priceUnit === '100g' ? '/ 100g' : '/ kg');
+      document.getElementById('val-unit-rate').innerHTML = 
+        `Đơn giá: ${formatVND(displayRate)} ${rateSuffix} <span class="edit-price-inline" onclick="togglePriceMenu()">[Sửa]</span>`;
+      document.getElementById('val-tare-state').innerText = isFruit 
+        ? "Đang cân • Cảm biến HX711 (80Hz)" 
+        : "Đã trừ bì (Tare 0g) • Cảm biến HX711 sẵn sàng";
+
+      const srcPill = document.getElementById('val-source-pill');
+      if (srcPill) {
+        srcPill.innerText = d.stm32_live ? "STM32 HX711 • Live" : "STM32 HX711";
+        srcPill.style.color = d.stm32_live ? "var(--green)" : "var(--text-dim)";
+      }
+
+      // 4. Viewfinder HUD
+      document.getElementById('target-icon').innerText = meta.emoji;
+      document.getElementById('target-name').innerText = isFruit ? meta.name : "Đang quét đĩa cân...";
+      document.getElementById('target-conf').innerText = isFruit ? (d.confidence * 100).toFixed(0) + "%" : "--";
+      const totalTime = (d.dsp_ms || 8) + (d.infer_ms || 42);
+      const fps = totalTime > 0 ? (1000 / totalTime).toFixed(0) : "20";
+      if (isDemoMode) {
+        document.getElementById('cam-fps-hud').innerText = fps + " FPS";
+      }
+
+      // 5. Fruit Variety Strip Status
+      document.getElementById('fruit-emoji').innerText = meta.emoji;
+      document.getElementById('fruit-title').innerText = isFruit ? meta.name : "Cân trống";
+      const votes = d.votes !== undefined ? d.votes : (isFruit ? 4 : 0);
+      const burstTotal = d.burst_total || 4;
+      const pct = Math.round((votes / burstTotal) * 100);
+      document.getElementById('fruit-sub').innerText = isFruit 
+        ? `Đồng thuận ${votes}/${burstTotal} (${pct}%) • Nhận diện chuẩn xác ✨`
+        : "Đĩa cân trống • Sẵn sàng đặt quả";
+      document.getElementById('consensus-bar').style.width = isFruit ? pct + "%" : "0%";
+
+      // 6. Hardware Telemetry Grid & Meter Bars
+      const inferVal = d.infer_ms || 42;
+      const dspVal = d.dsp_ms || 8;
+      const tempVal = d.temp ? d.temp.toFixed(1) : "48.2";
+      const psramVal = d.psram_kb || 3840;
+
+      document.getElementById('t-infer').innerText = inferVal + " ms";
+      document.getElementById('t-dsp').innerText = dspVal + " ms";
+      document.getElementById('t-fps').innerText = fps + " FPS";
+      document.getElementById('t-votes').innerText = `${votes}/${burstTotal}`;
+      document.getElementById('t-temp').innerText = tempVal + " °C";
+      document.getElementById('t-psram').innerText = psramVal + " KB";
+
+      // Animated Meter Bar Fills
+      const barInfer = document.getElementById('bar-infer');
+      if (barInfer) barInfer.style.width = Math.min(100, Math.round((inferVal / 80) * 100)) + "%";
+
+      const barDsp = document.getElementById('bar-dsp');
+      if (barDsp) barDsp.style.width = Math.min(100, Math.round((dspVal / 25) * 100)) + "%";
+
+      const barFps = document.getElementById('bar-fps');
+      if (barFps) barFps.style.width = Math.min(100, Math.round((parseFloat(fps) / 25) * 100)) + "%";
+
+      const barVotes = document.getElementById('bar-votes');
+      if (barVotes) barVotes.style.width = pct + "%";
+
+      const barTemp = document.getElementById('bar-temp');
+      if (barTemp) barTemp.style.width = Math.min(100, Math.round((parseFloat(tempVal) / 75) * 100)) + "%";
+
+      const barPsram = document.getElementById('bar-psram');
+      if (barPsram) barPsram.style.width = Math.min(100, Math.round((psramVal / 4096) * 100)) + "%";
+
+      if (isDemoMode) {
+        document.getElementById('cam-feed').src = createSvgView(label);
+      }
+    }
+
+    function setConnectionState(connected) {
+      isLiveConnected = connected;
+      const dot = document.getElementById('conn-dot');
+      const text = document.getElementById('conn-status');
+      if (connected) {
+        dot.style.background = "var(--green)";
+        dot.style.boxShadow = "0 0 8px var(--green)";
+        text.innerText = "SoftAP Live";
+        isDemoMode = false;
+        document.getElementById('demo-check').checked = false;
+      } else {
+        dot.style.background = "var(--amber)";
+        dot.style.boxShadow = "0 0 8px var(--amber)";
+        text.innerText = "Mô phỏng";
+      }
+    }
+
+    function toggleDemo(enabled) {
+      isDemoMode = enabled;
+      if (enabled) {
+        renderData(DEMO_SAMPLES[demoIndex]);
+      } else {
+        updateFrame();
+        poll();
+      }
+    }
+
+    function triggerInference() {
+      // 1. Shutter Flash
+      const fx = document.getElementById('shutter-fx');
+      fx.classList.add('active');
+      setTimeout(() => fx.classList.remove('active'), 120);
+
+      // 2. AI Horizontal Laser Sweep & Bracket Pulse
+      const vf = document.querySelector('.viewfinder');
+      const laser = document.getElementById('ai-scan-laser');
+      if (laser) {
+        laser.classList.remove('scanning');
+        void laser.offsetWidth;
+        laser.classList.add('scanning');
+        setTimeout(() => laser.classList.remove('scanning'), 850);
+      }
+      if (vf) {
+        vf.classList.add('scanning');
+        setTimeout(() => vf.classList.remove('scanning'), 850);
+      }
+
+      // 3. Telemetry Cell Flash Feedback
+      const cells = document.querySelectorAll('.telem-cell');
+      cells.forEach(c => c.classList.add('flash-update'));
+      setTimeout(() => cells.forEach(c => c.classList.remove('flash-update')), 350);
+
+      if (isDemoMode) {
+        demoIndex = (demoIndex + 1) % DEMO_SAMPLES.length;
+        renderData(DEMO_SAMPLES[demoIndex]);
+      } else {
+        fetch('/trigger').catch(() => {});
+        setTimeout(poll, 250);
+      }
+    }
+
+    function toggleFlash() {
+      flashActive = !flashActive;
+      const btn = document.getElementById('btn-flash');
+      const lbl = document.getElementById('lbl-flash');
+      btn.classList.toggle('flash-active', flashActive);
+      lbl.innerText = flashActive ? "Đèn BẬT" : "Đèn Flash";
+      if (!isDemoMode) fetch('/flash').catch(() => {});
+    }
+
+    // Init
+    updateThemeButton();
+    syncPriceInputs();
+    savePrices();
+    setInterval(poll, 350);
+    poll();
+    updateFrame();
+  </script>
+</body>
+</html>

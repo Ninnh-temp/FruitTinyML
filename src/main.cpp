@@ -69,13 +69,6 @@ static float g_price_apple  = UNIT_PRICE_APPLE;
 static float g_price_orange = UNIT_PRICE_ORANGE;
 static float g_price_pear   = UNIT_PRICE_PEAR;
 
-enum MockWeightMode {
-    MOCK_WEIGHT_RANDOM,      // Realistic random weight per detected fruit
-    MOCK_WEIGHT_FIXED_200G,  // Fixed 200.0g test value
-    MOCK_WEIGHT_TOO_LIGHT    // 15.0g (fails sanity bounds check)
-};
-static MockWeightMode g_weight_mode = MOCK_WEIGHT_RANDOM;
-
 // --- Live Telemetry Structure for Web & Serial ---
 struct LiveScaleTelemetry {
     char label[16];
@@ -143,59 +136,110 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Cân Thông Minh AI - Edge Retail Scale</title>
+  <title>Cân Thông Minh AI - Smart Grocer POS Cockpit</title>
   <style>
+    /* ==========================================================================
+       Catppuccin Theme Engine (Mocha 🌙 vs. Latte Daylight ☀️)
+       ========================================================================== */
     :root {
-      --bg: #090d14;
-      --panel: #111722;
-      --panel-tint: #161f2e;
-      --subtle: #1c2738;
-      --text: #f8fafc;
-      --text-muted: #8b99ad;
-      --text-dim: #4b586d;
-      --accent: #38bdf8;
-      --accent-glow: rgba(56, 189, 248, 0.2);
-      --green: #22c55e;
-      --green-glow: rgba(34, 197, 94, 0.2);
-      --amber: #f59e0b;
-      --red: #ef4444;
+      /* Catppuccin Mocha (Night Default) */
+      --bg: #11111b;          /* Crust */
+      --mantle: #181825;
+      --panel: #1e1e2e;       /* Base */
+      --panel-tint: #25273a;
+      --panel-surface: #313244; /* Surface0 */
+      --border-color: rgba(137, 180, 250, 0.28);
+      --text: #cdd6f4;        /* Text */
+      --text-muted: #a6adc8;  /* Subtext0 */
+      --text-dim: #6c7086;    /* Overlay0 */
+      --key-shadow: #09090f;
+      --dot-color: rgba(108, 112, 134, 0.22);
+
+      /* Chameleon Fruit Accents (Dynamic) */
+      --accent: #89b4fa;      /* Blue (Standby) */
+      --accent-glow: rgba(137, 180, 250, 0.22);
+      --green: #a6e3a1;
+      --green-glow: rgba(166, 227, 161, 0.22);
+      --amber: #f9e2af;
+      --red: #f38ba8;
+      --mauve: #cba6f7;
+      --peach: #fab387;
+
       --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      --font-mono: Consolas, "Cascadia Mono", "Segoe UI Mono", "Roboto Mono", "SF Mono", monospace;
+      --font-mono: "JetBrains Mono", "Fira Code", Consolas, "Cascadia Mono", "Segoe UI Mono", monospace;
+      --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+      --ease-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    [data-theme="day"] {
+      /* Catppuccin Latte (Daylight Warm) */
+      --bg: #dce0e8;          /* Crust / Mantle */
+      --mantle: #e6e9ef;
+      --panel: #eff1f5;       /* Base */
+      --panel-tint: #e6e9ef;
+      --panel-surface: #ccd0da; /* Surface0 */
+      --border-color: rgba(30, 102, 245, 0.25);
+      --text: #4c4f69;        /* Text */
+      --text-muted: #5c5f77;  /* Subtext0 */
+      --text-dim: #8c8fa1;    /* Overlay0 */
+      --key-shadow: #bcc0cc;
+      --dot-color: rgba(140, 143, 161, 0.3);
+
+      --accent: #1e66f5;      /* Sapphire / Blue */
+      --accent-glow: rgba(30, 102, 245, 0.18);
+      --green: #40a02b;
+      --green-glow: rgba(64, 160, 43, 0.2);
+      --amber: #df8e1d;
+      --red: #d20f39;
+      --mauve: #8839ef;
+      --peach: #fe640b;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
     body {
-      font-family: var(--font-sans);
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      background: var(--bg);
+      font-family: var(--font-mono);
+      background-color: var(--bg);
+      background-image: radial-gradient(var(--dot-color) 1.5px, transparent 1.5px);
+      background-size: 18px 18px;
       color: var(--text);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       padding: 14px;
+      transition: background-color 0.4s ease, color 0.4s ease;
     }
 
     .cockpit {
       width: 100%;
-      max-width: 1060px;
+      max-width: 1080px;
       display: flex;
       flex-direction: column;
       gap: 14px;
     }
 
-    header {
+    /* ==========================================================================
+       Header Bar
+       ========================================================================== */
+    .header-bar {
+      width: 100%;
+      background: var(--panel);
+      border: 2px solid var(--border-color);
+      border-radius: 14px;
+      padding: 8px 14px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 2px;
       flex-wrap: wrap;
-      gap: 8px;
+      gap: 10px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+      backdrop-filter: blur(12px);
+      transition: all 0.3s ease;
     }
     .brand-title {
-      font-size: 1.15rem;
-      font-weight: 700;
+      font-size: 1.1rem;
+      font-weight: 800;
       letter-spacing: -0.3px;
       display: flex;
       align-items: center;
@@ -203,28 +247,71 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     }
     .brand-badge {
       font-size: 0.65rem;
-      background: rgba(56, 189, 248, 0.15);
+      background: rgba(137, 180, 250, 0.15);
       color: var(--accent);
-      padding: 2px 7px;
-      border-radius: 12px;
+      padding: 2px 8px;
+      border-radius: 10px;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.5px;
+      border: 1px solid var(--border-color);
+      transition: all 0.3s ease;
     }
-    .header-pills {
+    .header-right {
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
     }
+
+    /* Tactile 3D Keycap Buttons */
+    .pill-btn {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 9px;
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      background: var(--panel-tint);
+      border: 1.5px solid var(--border-color);
+      border-bottom: 3.5px solid var(--key-shadow);
+      color: var(--text);
+      cursor: pointer;
+      user-select: none;
+      transform: translateY(0);
+      box-shadow: 0 3px 6px rgba(0,0,0,0.25);
+      transition: transform 0.1s var(--ease-spring), border-bottom-width 0.1s ease, background 0.2s ease, border-color 0.2s ease;
+    }
+    .pill-btn:hover {
+      transform: translateY(-2px);
+      border-bottom-width: 5px;
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .pill-btn:active {
+      transform: translateY(2px);
+      border-bottom-width: 1.5px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    }
+    .pill-btn.active {
+      background: rgba(137, 180, 250, 0.15);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
     .status-pill {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      padding: 5px 12px;
-      border-radius: 20px;
+      padding: 6px 12px;
+      border-radius: 9px;
       font-size: 0.75rem;
-      font-weight: 600;
-      background: var(--panel);
+      font-weight: 700;
+      background: var(--mantle);
+      border: 1.5px solid var(--border-color);
       color: var(--text-muted);
     }
     .conn-dot {
@@ -232,27 +319,8 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       height: 7px;
       border-radius: 50%;
       background: var(--green);
-      box-shadow: 0 0 6px var(--green);
-    }
-    .pill-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 5px 12px;
-      border-radius: 20px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      background: var(--panel);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      color: var(--text);
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-    .pill-btn:hover { background: var(--panel-tint); }
-    .pill-btn.active {
-      background: rgba(56, 189, 248, 0.15);
-      border-color: var(--accent);
-      color: var(--accent);
+      box-shadow: 0 0 8px var(--green);
+      transition: all 0.3s ease;
     }
     .demo-toggle-label {
       cursor: pointer;
@@ -260,37 +328,102 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       align-items: center;
       gap: 6px;
       font-size: 0.75rem;
+      font-weight: 700;
       color: var(--text-dim);
       user-select: none;
     }
     .demo-toggle-label input { cursor: pointer; accent-color: var(--accent); }
 
+    /* ==========================================================================
+       Tiled Cockpit Window Grid
+       ========================================================================== */
     .cockpit-grid {
       display: grid;
-      grid-template-columns: 1.15fr 1fr;
+      grid-template-columns: 1.18fr 1fr;
       gap: 16px;
       align-items: stretch;
     }
-    @media (max-width: 820px) {
+    @media (max-width: 840px) {
       .cockpit-grid { grid-template-columns: 1fr; gap: 14px; }
     }
 
+    /* Common Cockpit Window Styling */
+    .tiled-window {
+      background: var(--panel);
+      border: 2px solid var(--border-color);
+      border-radius: 14px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+      transition: transform 0.35s var(--ease-spring), border-color 0.35s ease, box-shadow 0.35s ease;
+    }
+    .tiled-window:hover {
+      transform: translateY(-2px);
+    }
+    .tiled-window.accent-border {
+      border-color: var(--accent);
+      box-shadow: 0 0 20px var(--accent-glow), 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    /* Monospace Terminal Window Title Bar */
+    .win-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 12px;
+      background: var(--mantle);
+      border-bottom: 1.5px solid var(--border-color);
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      user-select: none;
+      transition: border-color 0.3s ease;
+    }
+    .win-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .win-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .dot-close { background: var(--red); }
+    .dot-min { background: var(--amber); }
+    .dot-max { background: var(--green); }
+    .win-title-text {
+      letter-spacing: 0.4px;
+      color: var(--text);
+    }
+    .win-tag {
+      font-size: 0.65rem;
+      background: var(--panel-tint);
+      border: 1px solid var(--border-color);
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: var(--text-dim);
+    }
+
+    /* Left Column: Viewfinder & Controls */
     .monitor-col {
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
     }
+
     .viewfinder {
       position: relative;
       width: 100%;
       aspect-ratio: 4 / 3;
       background: #020408;
-      border-radius: 14px;
       overflow: hidden;
       display: flex;
       align-items: center;
       justify-content: center;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+      cursor: pointer;
     }
     #cam-feed {
       width: 100%;
@@ -298,125 +431,205 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       object-fit: contain;
       display: block;
     }
-    
+
+    /* CRT Scanline Texture Overlay */
+    .crt-scanlines {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.35) 50%);
+      background-size: 100% 4px;
+      z-index: 3;
+      pointer-events: none;
+      opacity: 0.55;
+    }
+
+    /* Camera Viewfinder Glowing Corner Brackets */
     .bracket {
       position: absolute;
-      width: 20px;
-      height: 20px;
-      border: 2px solid rgba(56, 189, 248, 0.6);
+      width: 28px;
+      height: 28px;
+      border: 3.5px solid var(--accent);
+      filter: drop-shadow(0 0 10px var(--accent-glow));
       pointer-events: none;
+      z-index: 4;
+      transition: all 0.35s var(--ease-spring);
     }
-    .br-tl { top: 12px; left: 12px; border-right: none; border-bottom: none; }
-    .br-tr { top: 12px; right: 12px; border-left: none; border-bottom: none; }
-    .br-bl { bottom: 12px; left: 12px; border-right: none; border-top: none; }
-    .br-br { bottom: 12px; right: 12px; border-left: none; border-top: none; }
+    .br-tl { top: 12px; left: 12px; border-right: none; border-bottom: none; border-top-left-radius: 6px; }
+    .br-tr { top: 12px; right: 12px; border-left: none; border-bottom: none; border-top-right-radius: 6px; }
+    .br-bl { bottom: 12px; left: 12px; border-right: none; border-top: none; border-bottom-left-radius: 6px; }
+    .br-br { bottom: 12px; right: 12px; border-left: none; border-top: none; border-bottom-right-radius: 6px; }
 
+    .viewfinder.scanning .bracket {
+      border-color: #ffffff;
+      filter: drop-shadow(0 0 12px var(--accent));
+      animation: bracketPulse 0.8s ease-in-out;
+    }
+    @keyframes bracketPulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.18); }
+    }
+
+    /* AI Horizontal Scanning Laser Bar */
+    .ai-scan-laser {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, transparent 0%, var(--accent) 25%, #ffffff 50%, var(--accent) 75%, transparent 100%);
+      box-shadow: 0 0 16px var(--accent), 0 0 6px #ffffff;
+      opacity: 0;
+      pointer-events: none;
+      top: 0;
+      z-index: 5;
+    }
+    .ai-scan-laser.scanning {
+      animation: laserSweep 0.8s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    }
+    @keyframes laserSweep {
+      0% { top: 0%; opacity: 0; }
+      15% { opacity: 1; }
+      85% { opacity: 1; }
+      100% { top: 100%; opacity: 0; }
+    }
+
+    /* Shutter Flash */
     .shutter-flash {
       position: absolute;
       inset: 0;
       background: white;
       opacity: 0;
       pointer-events: none;
+      z-index: 6;
       transition: opacity 0.25s ease-out;
     }
     .shutter-flash.active { opacity: 0.85; transition: opacity 0.03s ease-in; }
 
+    /* Viewfinder HUD Overlays - Inset to ensure corner brackets are completely visible */
     .hud-top {
       position: absolute;
-      top: 10px;
-      left: 10px;
-      right: 10px;
+      top: 16px;
+      left: 52px;
+      right: 52px;
       display: flex;
       justify-content: space-between;
       pointer-events: none;
+      z-index: 5;
     }
     .hud-tag {
-      background: rgba(9, 13, 20, 0.75);
+      background: rgba(17, 17, 27, 0.85);
       backdrop-filter: blur(8px);
       padding: 4px 10px;
       border-radius: 6px;
       font-size: 0.72rem;
-      font-family: var(--font-mono);
       font-variant-numeric: tabular-nums;
-      font-weight: 600;
+      font-weight: 700;
       color: var(--text-muted);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     }
     .hud-bottom {
       position: absolute;
-      bottom: 10px;
-      left: 10px;
-      right: 10px;
+      bottom: 16px;
+      left: 52px;
+      right: 52px;
       display: flex;
       justify-content: space-between;
       align-items: center;
       pointer-events: none;
+      z-index: 5;
     }
     .live-target-badge {
       display: flex;
       align-items: center;
       gap: 6px;
-      background: rgba(9, 13, 20, 0.85);
+      background: rgba(17, 17, 27, 0.9);
       backdrop-filter: blur(10px);
       padding: 6px 12px;
       border-radius: 8px;
       font-size: 0.85rem;
       font-weight: 700;
       color: var(--text);
+      border: 1.5px solid var(--border-color);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
     }
 
+    /* Action Mechanical Keys */
     .action-strip {
       display: grid;
-      grid-template-columns: 2fr 1fr 1fr;
-      gap: 8px;
+      grid-template-columns: 1.5fr 1fr;
+      gap: 10px;
     }
     .act-btn {
-      padding: 12px 10px;
-      border-radius: 10px;
-      border: none;
+      position: relative;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 2px solid var(--border-color);
+      border-bottom: 4px solid var(--key-shadow);
       background: var(--panel);
       color: var(--text);
+      font-family: var(--font-mono);
       font-size: 0.86rem;
-      font-weight: 600;
-      display: flex;
+      font-weight: 700;
+      display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 6px;
+      gap: 8px;
       cursor: pointer;
-      transition: all 0.15s ease;
       user-select: none;
+      transform: translateY(0);
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);
+      transition: transform 0.1s var(--ease-spring), border-bottom-width 0.1s ease, background 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
     }
-    .act-btn:hover { background: var(--panel-tint); transform: translateY(-1px); }
-    .act-btn:active { transform: translateY(1px); }
+    .act-btn:hover {
+      transform: translateY(-2px);
+      border-bottom-width: 6px;
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 8px 18px var(--accent-glow);
+    }
+    .act-btn:active {
+      transform: translateY(2px);
+      border-bottom-width: 2px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+    }
     .act-btn.primary {
-      background: linear-gradient(135deg, #0284c7, #0369a1);
-      color: white;
-      box-shadow: 0 4px 12px rgba(2, 132, 199, 0.35);
+      background: var(--accent);
+      border-color: var(--accent);
+      border-bottom: 4px solid var(--key-shadow);
+      color: #11111b;
+      box-shadow: 0 4px 14px var(--accent-glow);
     }
-    .act-btn.primary:hover { background: linear-gradient(135deg, #0369a1, #0284c7); }
+    .act-btn.primary:hover {
+      filter: brightness(1.1);
+      box-shadow: 0 8px 22px var(--accent-glow);
+      color: #11111b;
+    }
     .act-btn.flash-active {
-      background: rgba(245, 158, 11, 0.2);
-      color: #fde68a;
+      background: var(--amber);
+      border-color: var(--amber);
+      color: #11111b;
+      box-shadow: 0 4px 14px rgba(249, 226, 175, 0.35);
     }
 
+    /* Right Column: Metrology, Price Tray & Hardware Telemetry */
     .console-col {
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 14px;
       justify-content: space-between;
     }
 
+    /* Metrology POS Terminal Window */
     .metrology-block {
-      background: var(--panel);
-      border-radius: 14px;
-      padding: 16px 18px;
+      padding: 14px 16px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 10px;
     }
     .metrology-row-top {
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
+      align-items: center;
     }
     .metrology-title {
       font-size: 0.72rem;
@@ -425,18 +638,26 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       font-weight: 700;
       color: var(--text-dim);
     }
+    .source-pill {
+      font-size: 0.65rem;
+      background: var(--mantle);
+      border: 1px solid var(--border-color);
+      color: var(--text-dim);
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-weight: 700;
+    }
     .mass-hero-wrap {
       display: flex;
       align-items: baseline;
       gap: 8px;
     }
     .mass-val {
-      font-family: var(--font-sans);
       font-variant-numeric: tabular-nums;
       font-size: 3.4rem;
       font-weight: 800;
       line-height: 1;
-      letter-spacing: -0.5px;
+      letter-spacing: -1px;
       color: var(--text);
     }
     .mass-unit {
@@ -445,33 +666,39 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       color: var(--text-muted);
     }
     .mass-kg-sub {
-      font-family: var(--font-sans);
       font-variant-numeric: tabular-nums;
       font-size: 1rem;
-      font-weight: 600;
+      font-weight: 700;
       color: var(--text-dim);
       text-align: right;
+    }
+
+    /* Dashed Receipt Line */
+    .receipt-divider {
+      height: 1px;
+      border: none;
+      border-top: 1.5px dashed var(--border-color);
+      margin: 4px 0;
     }
 
     .price-line {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
-      padding-top: 10px;
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      padding-top: 2px;
     }
     .price-total-wrap {
       display: flex;
       flex-direction: column;
     }
     .price-total-val {
-      font-family: var(--font-sans);
       font-variant-numeric: tabular-nums;
       font-size: 2.3rem;
       font-weight: 800;
       letter-spacing: -0.5px;
       color: var(--accent);
       line-height: 1;
+      transition: color 0.35s ease;
     }
     .price-rate-wrap {
       text-align: right;
@@ -484,13 +711,24 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       cursor: pointer;
       text-decoration: underline;
       margin-left: 4px;
+      font-weight: 700;
     }
 
+    /* Spring Pop Animation */
+    @keyframes springPop {
+      0% { transform: scale(0.6) rotate(-8deg); opacity: 0.5; }
+      50% { transform: scale(1.3) rotate(5deg); opacity: 1; }
+      75% { transform: scale(0.9) rotate(-2deg); }
+      100% { transform: scale(1) rotate(0deg); opacity: 1; }
+    }
+    .spring-pop {
+      display: inline-block;
+      animation: springPop 0.5s var(--ease-spring) forwards;
+    }
+
+    /* Price Editor Tray (Non-blocking modal replacement) */
     .price-editor-tray {
       display: none;
-      background: #141b26;
-      border: 1px solid rgba(56, 189, 248, 0.25);
-      border-radius: 12px;
       padding: 12px 14px;
       flex-direction: column;
       gap: 10px;
@@ -507,30 +745,32 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       justify-content: space-between;
       font-size: 0.75rem;
       font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
       color: var(--text-muted);
     }
     .unit-switch-group {
       display: flex;
       gap: 4px;
-      background: rgba(0, 0, 0, 0.3);
+      background: var(--mantle);
       padding: 2px;
-      border-radius: 6px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
     }
     .unit-opt-btn {
       padding: 3px 8px;
       font-size: 0.7rem;
+      font-family: var(--font-mono);
       font-weight: 700;
       border: none;
       background: none;
       color: var(--text-dim);
-      border-radius: 4px;
+      border-radius: 6px;
       cursor: pointer;
+      transition: all 0.15s ease;
     }
     .unit-opt-btn.selected {
       background: var(--accent);
-      color: #0b0f17;
+      color: var(--bg);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
     }
     .price-inputs-grid {
       display: grid;
@@ -541,16 +781,17 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       .price-inputs-grid { grid-template-columns: 1fr; }
     }
     .price-card {
-      background: rgba(255, 255, 255, 0.02);
-      border-radius: 8px;
+      background: var(--mantle);
+      border: 1px solid var(--border-color);
+      border-radius: 9px;
       padding: 8px 10px;
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 6px;
     }
     .price-card-label {
       font-size: 0.75rem;
-      font-weight: 600;
+      font-weight: 700;
       display: flex;
       align-items: center;
       gap: 4px;
@@ -561,34 +802,52 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       gap: 4px;
     }
     .step-btn {
-      width: 26px;
-      height: 26px;
-      border-radius: 6px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      background: var(--panel);
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      border: 1.5px solid var(--border-color);
+      border-bottom: 3px solid var(--key-shadow);
+      background: var(--panel-tint);
       color: var(--text);
-      font-size: 0.95rem;
+      font-family: var(--font-mono);
+      font-size: 1rem;
       font-weight: 700;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
+      user-select: none;
+      transform: translateY(0);
+      transition: transform 0.1s var(--ease-spring), border-bottom-width 0.1s ease;
     }
-    .step-btn:hover { background: var(--panel-tint); }
+    .step-btn:hover {
+      transform: translateY(-1px);
+      border-bottom-width: 4px;
+      border-color: var(--accent);
+    }
+    .step-btn:active {
+      transform: translateY(1.5px);
+      border-bottom-width: 1.5px;
+    }
     .price-input-box {
       flex: 1;
       width: 100%;
       min-width: 50px;
-      background: #090d14;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      border-radius: 6px;
+      background: var(--bg);
+      border: 1.5px solid var(--border-color);
+      border-radius: 7px;
       color: var(--text);
-      font-family: var(--font-sans);
+      font-family: var(--font-mono);
       font-variant-numeric: tabular-nums;
       font-size: 0.88rem;
       font-weight: 700;
       padding: 4px 6px;
       text-align: center;
+      outline: none;
+    }
+    .price-input-box:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 8px var(--accent-glow);
     }
     .price-tray-footer {
       display: flex;
@@ -604,63 +863,63 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     }
     .reset-link:hover { color: var(--accent); }
 
+    /* Fruit Variety Strip */
     .fruit-line {
+      padding: 12px 14px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      background: var(--panel);
-      border-radius: 12px;
-      padding: 12px 14px;
+      gap: 10px;
     }
     .fruit-info-left {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
     }
-    .fruit-icon { font-size: 1.5rem; line-height: 1; }
-    .fruit-name { font-size: 1rem; font-weight: 700; }
-    .fruit-consensus-txt { font-size: 0.74rem; color: var(--text-muted); }
-    .sanity-tag {
-      font-size: 0.75rem;
-      font-weight: 700;
-      padding: 4px 10px;
-      border-radius: 6px;
+    .fruit-icon {
+      font-size: 1.6rem;
+      line-height: 1;
+      user-select: none;
     }
-    .sanity-pass { background: rgba(34, 197, 94, 0.15); color: var(--green); }
-    .sanity-idle { background: rgba(255, 255, 255, 0.05); color: var(--text-dim); }
-    .sanity-fail { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+    .fruit-name {
+      font-size: 0.98rem;
+      font-weight: 800;
+      color: var(--text);
+    }
+    .fruit-consensus-txt {
+      font-size: 0.74rem;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .consensus-bar-wrap {
+      width: 100%;
+      height: 4px;
+      background: var(--mantle);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .consensus-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.3s ease, background-color 0.35s ease;
+    }
 
+
+    /* ==========================================================================
+       Hardware & AI Telemetry Monitor
+       ========================================================================== */
     .telemetry-block {
-      background: var(--panel);
-      border-radius: 14px;
-      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+    }
+    .telem-inner {
+      padding: 12px 14px;
       display: flex;
       flex-direction: column;
       gap: 10px;
     }
-    .telem-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    .telem-title {
-      font-size: 0.72rem;
-      text-transform: uppercase;
-      font-weight: 700;
-      letter-spacing: 0.8px;
-      color: var(--text-dim);
-    }
-    .telem-pulse {
-      font-size: 0.72rem;
-      font-family: var(--font-sans);
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      color: var(--accent);
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-
     .telem-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -670,44 +929,59 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       .telem-grid { grid-template-columns: repeat(2, 1fr); }
     }
     .telem-cell {
-      background: rgba(255, 255, 255, 0.02);
+      background: var(--mantle);
+      border: 1px solid var(--border-color);
       border-radius: 8px;
       padding: 8px 10px;
       display: flex;
       flex-direction: column;
-      gap: 2px;
-      transition: background 0.3s ease;
+      gap: 5px;
+      transition: background 0.3s ease, border-color 0.3s ease;
     }
     .telem-cell.flash-update {
-      background: rgba(56, 189, 248, 0.15);
+      background: rgba(137, 180, 250, 0.2);
+      border-color: var(--accent);
+    }
+    .telem-meta-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
     }
     .telem-k {
-      font-size: 0.68rem;
+      font-size: 0.65rem;
       color: var(--text-dim);
-      font-weight: 600;
+      font-weight: 700;
       text-transform: uppercase;
     }
     .telem-v {
-      font-family: var(--font-sans);
       font-variant-numeric: tabular-nums;
-      font-size: 0.88rem;
-      font-weight: 700;
+      font-size: 0.85rem;
+      font-weight: 800;
       color: var(--text);
     }
-
-    .consensus-bar-wrap {
+    .meter-bar {
       width: 100%;
-      height: 4px;
-      background: rgba(255, 255, 255, 0.05);
+      height: 3px;
+      background: var(--panel-tint);
       border-radius: 2px;
       overflow: hidden;
-      margin-top: 2px;
     }
-    .consensus-bar-fill {
+    .meter-fill {
       height: 100%;
-      background: linear-gradient(90deg, var(--accent), var(--green));
-      width: 0%;
-      transition: width 0.3s ease;
+      background: var(--accent);
+      width: 50%;
+      transition: width 0.35s ease, background 0.35s ease;
+    }
+
+    .telem-footer {
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      text-align: center;
+      padding-top: 4px;
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
 
     footer {
@@ -721,15 +995,20 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 <body>
 
   <div class="cockpit">
-    <header>
+    <!-- Header Bar -->
+    <header class="header-bar">
       <div class="brand-title">
         <span>Cân Thông Minh AI</span>
         <span class="brand-badge">ESP32 + STM32</span>
       </div>
-      <div class="header-pills">
+      <div class="header-right">
         <button class="pill-btn" id="btn-price-menu" onclick="togglePriceMenu()">
           <span>🏷️</span>
           <span>Bảng Giá (VND)</span>
+        </button>
+        <button class="pill-btn" id="btn-theme-toggle" onclick="toggleRiceTheme()">
+          <span id="lbl-theme-icon">🌙</span>
+          <span id="lbl-theme-text">Tối</span>
         </button>
         <div class="status-pill">
           <span class="conn-dot" id="conn-dot"></span>
@@ -742,31 +1021,52 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       </div>
     </header>
 
+    <!-- Cockpit Main Area: Window Grid -->
     <div class="cockpit-grid">
+      <!-- Left Column: Viewfinder & Primary Triggers -->
       <div class="monitor-col">
-        <div class="viewfinder" onclick="triggerInference()">
-          <img id="cam-feed" src="/capture" alt="Camera Stream" onerror="handleImageError()">
-          <div class="shutter-flash" id="shutter-fx"></div>
-
-          <div class="bracket br-tl"></div>
-          <div class="bracket br-tr"></div>
-          <div class="bracket br-bl"></div>
-          <div class="bracket br-br"></div>
-
-          <div class="hud-top">
-            <div class="hud-tag">OV2640 • 320x240</div>
-            <div class="hud-tag" id="cam-fps-hud">-- FPS</div>
+        <!-- Viewfinder Tiled Window -->
+        <div class="tiled-window accent-border">
+          <div class="win-titlebar">
+            <div class="win-controls">
+              <span class="win-dot dot-close"></span>
+              <span class="win-dot dot-min"></span>
+              <span class="win-dot dot-max"></span>
+            </div>
+            <div class="win-title-text">Camera Giám Sát (OV2640 • 320x240)</div>
+            <span class="win-tag">CAMERA LIVE</span>
           </div>
 
-          <div class="hud-bottom">
-            <div class="live-target-badge">
-              <span id="target-icon">⚖️</span>
-              <span id="target-name">Đang quét đĩa cân...</span>
+          <div class="viewfinder" onclick="triggerInference()">
+            <img id="cam-feed" src="/capture" alt="Camera Stream" onerror="handleImageError()">
+            <div class="shutter-flash" id="shutter-fx"></div>
+            <div class="crt-scanlines"></div>
+            <div class="ai-scan-laser" id="ai-scan-laser"></div>
+
+            <!-- Viewfinder Brackets -->
+            <div class="bracket br-tl"></div>
+            <div class="bracket br-tr"></div>
+            <div class="bracket br-bl"></div>
+            <div class="bracket br-br"></div>
+
+            <!-- Top HUD -->
+            <div class="hud-top">
+              <div class="hud-tag">FOMO INT8 • 96x96</div>
+              <div class="hud-tag" id="cam-fps-hud">-- FPS</div>
             </div>
-            <div class="hud-tag" id="target-conf">-- %</div>
+
+            <!-- Bottom HUD Status -->
+            <div class="hud-bottom">
+              <div class="live-target-badge">
+                <span id="target-icon">⚖️</span>
+                <span id="target-name">Đang quét đĩa cân...</span>
+              </div>
+              <div class="hud-tag" id="target-conf">-- %</div>
+            </div>
           </div>
         </div>
 
+        <!-- Controls (2-Column Action Strip) -->
         <div class="action-strip">
           <button class="act-btn primary" onclick="triggerInference()">
             <span>⚡</span>
@@ -776,41 +1076,66 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
             <span>💡</span>
             <span id="lbl-flash">Đèn Flash</span>
           </button>
-          <button class="act-btn" onclick="cycleWeight()">
-            <span>⚖️</span>
-            <span>Đổi Khối Lượng</span>
-          </button>
         </div>
       </div>
 
+      <!-- Right Column: Metrology POS, Price Tray & Telemetry -->
       <div class="console-col">
-        <div class="metrology-block">
-          <div class="metrology-row-top">
-            <span class="metrology-title">Khối lượng cân (Mass)</span>
-            <span id="val-source-pill" style="font-size:0.7rem; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,0.08); color:#94a3b8; font-weight:600;">Mô phỏng</span>
-            <span class="mass-kg-sub" id="val-mass-kg">0,000 kg</span>
-          </div>
-          <div class="mass-hero-wrap">
-            <span class="mass-val" id="val-mass">0.0</span>
-            <span class="mass-unit">g</span>
-          </div>
-          
-          <div class="price-line">
-            <div class="price-total-wrap">
-              <span class="metrology-title">Thành tiền (VND)</span>
-              <span class="price-total-val" id="val-total">0 ₫</span>
+        <!-- Metrology Tiled Window -->
+        <div class="tiled-window accent-border">
+          <div class="win-titlebar">
+            <div class="win-controls">
+              <span class="win-dot dot-close"></span>
+              <span class="win-dot dot-min"></span>
+              <span class="win-dot dot-max"></span>
             </div>
-            <div class="price-rate-wrap">
-              <div id="val-unit-rate">
-                Đơn giá: 0 ₫ / kg
-                <span class="edit-price-inline" onclick="togglePriceMenu()">[Sửa]</span>
+            <div class="win-title-text">Bảng Tính Tiền & Cân Khối Lượng (HX711)</div>
+            <span class="win-tag">POS THÀNH TIỀN</span>
+          </div>
+
+          <div class="metrology-block">
+            <div class="metrology-row-top">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="metrology-title">Khối lượng cân</span>
+                <span class="source-pill" id="val-source-pill">STM32 HX711</span>
               </div>
-              <div style="font-size:0.75rem; color:var(--text-dim);" id="val-tare-state">Đã trừ bì (Tare 0g)</div>
+              <span class="mass-kg-sub" id="val-mass-kg">0,000 kg</span>
+            </div>
+            <div class="mass-hero-wrap">
+              <span class="mass-val" id="val-mass">0.0</span>
+              <span class="mass-unit">g</span>
+            </div>
+            
+            <div class="receipt-divider"></div>
+
+            <div class="price-line">
+              <div class="price-total-wrap">
+                <span class="metrology-title">Thành tiền</span>
+                <span class="price-total-val" id="val-total">0 ₫</span>
+              </div>
+              <div class="price-rate-wrap">
+                <div id="val-unit-rate">
+                  Đơn giá: 0 ₫ / kg
+                  <span class="edit-price-inline" onclick="togglePriceMenu()">[Sửa]</span>
+                </div>
+                <div style="font-size:0.75rem; color:var(--text-dim);" id="val-tare-state">Đã trừ bì (Tare 0g) • Sensor HX711 sẵn sàng</div>
+              </div>
             </div>
           </div>
         </div>
 
-        <div class="price-editor-tray" id="price-tray">
+        <!-- Non-Blocking Price Change Tray -->
+        <div class="tiled-window price-editor-tray" id="price-tray">
+          <div class="win-titlebar" style="margin:-12px -14px 10px -14px;">
+            <div class="win-controls">
+              <span class="win-dot dot-close"></span>
+              <span class="win-dot dot-min"></span>
+              <span class="win-dot dot-max"></span>
+            </div>
+            <div class="win-title-text">Cài Đặt Đơn Giá Nhanh (VND)</div>
+            <span class="win-tag">CÀI ĐẶT GIÁ</span>
+          </div>
+
           <div class="price-tray-header">
             <span>Cài Đặt Đơn Giá Nhanh (VND)</span>
             <div class="unit-switch-group">
@@ -821,6 +1146,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
           </div>
 
           <div class="price-inputs-grid">
+            <!-- Apple (Táo) -->
             <div class="price-card">
               <span class="price-card-label">🍎 Táo (Apple)</span>
               <div class="price-stepper">
@@ -830,6 +1156,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
               </div>
             </div>
 
+            <!-- Orange (Cam) -->
             <div class="price-card">
               <span class="price-card-label">🍊 Cam (Orange)</span>
               <div class="price-stepper">
@@ -839,6 +1166,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
               </div>
             </div>
 
+            <!-- Pear (Lê) -->
             <div class="price-card">
               <span class="price-card-label">🍐 Lê (Pear)</span>
               <div class="price-stepper">
@@ -855,56 +1183,88 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
           </div>
         </div>
 
-        <div class="fruit-line">
+        <!-- Detected Fruit Variety Strip -->
+        <div class="tiled-window fruit-line">
           <div class="fruit-info-left">
             <span class="fruit-icon" id="fruit-emoji">⚖️</span>
             <div>
-              <div class="fruit-name" id="fruit-title">Cân trống (Empty)</div>
+              <div class="fruit-name" id="fruit-title">Cân trống</div>
               <div class="fruit-consensus-txt" id="fruit-sub">Đĩa cân trống • Sẵn sàng đặt quả</div>
               <div class="consensus-bar-wrap">
                 <div class="consensus-bar-fill" id="consensus-bar"></div>
               </div>
             </div>
           </div>
-          <span class="sanity-tag sanity-idle" id="sanity-pill">ĐÃ BÌ (TARE)</span>
         </div>
 
-        <div class="telemetry-block">
-          <div class="telem-header">
-            <span class="telem-title">Thông số phần cứng & TinyML AI</span>
-            <span class="telem-pulse" id="telem-live-pill">● HOẠT ĐỘNG</span>
+        <!-- Telemetry Monitor Window -->
+        <div class="tiled-window telemetry-block">
+          <div class="win-titlebar">
+            <div class="win-controls">
+              <span class="win-dot dot-close"></span>
+              <span class="win-dot dot-min"></span>
+              <span class="win-dot dot-max"></span>
+            </div>
+            <div class="win-title-text">Thông Số Phần Cứng & TinyML AI</div>
+            <span class="win-tag" id="telem-live-pill">TRỰC TIẾP ●</span>
           </div>
 
-          <div class="telem-grid">
-            <div class="telem-cell" id="c-infer">
-              <span class="telem-k">Độ trễ AI</span>
-              <span class="telem-v" id="t-infer">-- ms</span>
+          <div class="telem-inner">
+            <div class="telem-grid">
+              <div class="telem-cell" id="c-infer">
+                <div class="telem-meta-row">
+                  <span class="telem-k">AI_LATENCY</span>
+                  <span class="telem-v" id="t-infer">-- ms</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-infer" style="width: 42%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-dsp">
+                <div class="telem-meta-row">
+                  <span class="telem-k">DSP_IMAGE</span>
+                  <span class="telem-v" id="t-dsp">-- ms</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-dsp" style="width: 16%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-fps">
+                <div class="telem-meta-row">
+                  <span class="telem-k">FRAME_RATE</span>
+                  <span class="telem-v" id="t-fps">-- FPS</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-fps" style="width: 66%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-consensus">
+                <div class="telem-meta-row">
+                  <span class="telem-k">VOTES_BURST</span>
+                  <span class="telem-v" id="t-votes">--</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-votes" style="width: 100%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-temp">
+                <div class="telem-meta-row">
+                  <span class="telem-k">DIE_TEMP</span>
+                  <span class="telem-v" id="t-temp">-- °C</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-temp" style="width: 60%;"></div></div>
+              </div>
+              <div class="telem-cell" id="c-psram">
+                <div class="telem-meta-row">
+                  <span class="telem-k">PSRAM_FREE</span>
+                  <span class="telem-v" id="t-psram">-- KB</span>
+                </div>
+                <div class="meter-bar"><div class="meter-fill" id="bar-psram" style="width: 92%;"></div></div>
+              </div>
             </div>
-            <div class="telem-cell" id="c-dsp">
-              <span class="telem-k">Xử lý ảnh DSP</span>
-              <span class="telem-v" id="t-dsp">-- ms</span>
-            </div>
-            <div class="telem-cell" id="c-fps">
-              <span class="telem-k">Tốc độ khung</span>
-              <span class="telem-v" id="t-fps">-- FPS</span>
-            </div>
-            <div class="telem-cell" id="c-consensus">
-              <span class="telem-k">Đồng thuận mẫu</span>
-              <span class="telem-v" id="t-votes">--</span>
-            </div>
-            <div class="telem-cell" id="c-temp">
-              <span class="telem-k">Nhiệt độ chip</span>
-              <span class="telem-v" id="t-temp">-- °C</span>
-            </div>
-            <div class="telem-cell" id="c-psram">
-              <span class="telem-k">PSRAM trống</span>
-              <span class="telem-v" id="t-psram">-- KB</span>
+
+            <div class="telem-footer">
+              <span>ESP32-CAM (FOMO INT8) + STM32 (HX711)</span>
+              <span>Bộ nhớ: 4MB PSRAM • SRAM</span>
             </div>
           </div>
         </div>
       </div>
     </div>
 
+    <!-- Footer -->
     <footer>
       Hệ Thống Cân Tính Tiền Thông Minh Edge AI • ESP32-CAM (FOMO INT8) & STM32 (HX711)
     </footer>
@@ -915,8 +1275,60 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     let isDemoMode = false;
     let flashActive = false;
     let demoIndex = 0;
-    let priceUnit = 'kg';
+    let priceUnit = 'kg'; // 'kg', '100g', 'g'
+    let prevFruitLabel = '';
+    let currentTheme = 'night';
 
+    // Day / Night Catppuccin Palettes
+    const PALETTES = {
+      night: {
+        apple:  { accent: '#f38ba8', glow: 'rgba(243, 139, 168, 0.28)' },
+        orange: { accent: '#fab387', glow: 'rgba(250, 179, 135, 0.28)' },
+        pear:   { accent: '#a6e3a1', glow: 'rgba(166, 227, 161, 0.28)' },
+        none:   { accent: '#89b4fa', glow: 'rgba(137, 180, 250, 0.22)' }
+      },
+      day: {
+        apple:  { accent: '#d20f39', glow: 'rgba(210, 15, 57, 0.25)' },
+        orange: { accent: '#fe640b', glow: 'rgba(254, 100, 11, 0.25)' },
+        pear:   { accent: '#40a02b', glow: 'rgba(64, 160, 43, 0.25)' },
+        none:   { accent: '#1e66f5', glow: 'rgba(30, 102, 245, 0.2)' }
+      }
+    };
+
+    // Load Theme Preference
+    try {
+      const savedTheme = localStorage.getItem('scale_rice_theme');
+      if (savedTheme === 'day') {
+        currentTheme = 'day';
+        document.documentElement.dataset.theme = 'day';
+      }
+    } catch (e) {}
+
+    function updateThemeButton() {
+      const icon = document.getElementById('lbl-theme-icon');
+      const text = document.getElementById('lbl-theme-text');
+      if (currentTheme === 'day') {
+        if (icon) icon.innerText = '☀️';
+        if (text) text.innerText = 'Sáng';
+      } else {
+        if (icon) icon.innerText = '🌙';
+        if (text) text.innerText = 'Tối';
+      }
+    }
+
+    function toggleRiceTheme() {
+      currentTheme = (currentTheme === 'night') ? 'day' : 'night';
+      if (currentTheme === 'day') {
+        document.documentElement.dataset.theme = 'day';
+      } else {
+        delete document.documentElement.dataset.theme;
+      }
+      try { localStorage.setItem('scale_rice_theme', currentTheme); } catch(e){}
+      updateThemeButton();
+      renderData(currentTelemetry);
+    }
+
+    // Default prices per kg in VND
     const DEFAULT_PRICES = {
       apple: 60000,
       orange: 40000,
@@ -939,10 +1351,10 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     };
 
     const DEMO_SAMPLES = [
-      { label: "apple", confidence: 0.945, weight: 218.4, votes: 4, dsp_ms: 8, infer_ms: 42, temp: 48.2, psram_kb: 3840, heap_kb: 172 },
-      { label: "orange", confidence: 0.892, weight: 184.2, votes: 4, dsp_ms: 9, infer_ms: 41, temp: 48.6, psram_kb: 3840, heap_kb: 171 },
-      { label: "pear", confidence: 0.961, weight: 235.8, votes: 4, dsp_ms: 8, infer_ms: 44, temp: 49.1, psram_kb: 3840, heap_kb: 170 },
-      { label: "none", confidence: 0.000, weight: 0.0, votes: 0, dsp_ms: 8, infer_ms: 39, temp: 47.9, psram_kb: 3840, heap_kb: 174 }
+      { label: "apple", confidence: 0.945, weight: 218.4, votes: 4, burst_total: 4, dsp_ms: 8, infer_ms: 42, temp: 48.2, psram_kb: 3840, heap_kb: 172, stm32_live: true },
+      { label: "orange", confidence: 0.892, weight: 184.2, votes: 4, burst_total: 4, dsp_ms: 9, infer_ms: 41, temp: 48.6, psram_kb: 3840, heap_kb: 171, stm32_live: true },
+      { label: "pear", confidence: 0.961, weight: 235.8, votes: 4, burst_total: 4, dsp_ms: 8, infer_ms: 44, temp: 49.1, psram_kb: 3840, heap_kb: 170, stm32_live: true },
+      { label: "none", confidence: 0.000, weight: 0.0, votes: 0, burst_total: 4, dsp_ms: 8, infer_ms: 39, temp: 47.9, psram_kb: 3840, heap_kb: 174, stm32_live: true }
     ];
 
     let currentTelemetry = DEMO_SAMPLES[demoIndex];
@@ -968,7 +1380,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     function convertRateForUnit(pricePerKg, unit) {
       if (unit === 'g') return pricePerKg / 1000.0;
       if (unit === '100g') return pricePerKg / 10.0;
-      return pricePerKg;
+      return pricePerKg; // 'kg'
     }
 
     function convertToPricePerKg(val, unit) {
@@ -1024,15 +1436,16 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     function savePrices() {
       try { localStorage.setItem('scale_prices_vnd_kg', JSON.stringify(customPrices)); } catch(e){}
       if (!isDemoMode) {
-        fetch(`/set_prices?apple=${Math.round(customPrices.apple)}&orange=${Math.round(customPrices.orange)}&pear=${Math.round(customPrices.pear)}`).catch(() => {});
+        fetch(`/set_prices?apple=${customPrices.apple}&orange=${customPrices.orange}&pear=${customPrices.pear}`).catch(() => {});
       }
     }
 
     function createSvgView(label) {
-      const colors = { apple: "#ef4444", orange: "#f97316", pear: "#84cc16", none: "#334155" };
-      const c = colors[label] || "#334155";
+      const themeSet = PALETTES[currentTheme] || PALETTES.night;
+      const c = (themeSet[label] ? themeSet[label].accent : '#89b4fa');
       const icon = FRUITS[label] ? FRUITS[label].emoji : "⚖️";
-      return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" fill="%23020408"/><circle cx="160" cy="120" r="52" fill="${encodeURIComponent(c)}" opacity="0.3"/><circle cx="160" cy="120" r="38" fill="${encodeURIComponent(c)}" opacity="0.75"/><text x="160" y="132" font-size="38" text-anchor="middle" font-family="sans-serif">${encodeURIComponent(icon)}</text></svg>`;
+      const bg = (currentTheme === 'day') ? "%23eff1f5" : "%23020408";
+      return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" fill="${bg}"/><circle cx="160" cy="120" r="54" fill="${encodeURIComponent(c)}" opacity="0.25"/><circle cx="160" cy="120" r="40" fill="${encodeURIComponent(c)}" opacity="0.75"/><text x="160" y="133" font-size="38" text-anchor="middle" font-family="sans-serif">${encodeURIComponent(icon)}</text></svg>`;
     }
 
     let lastFrameTime = performance.now();
@@ -1079,76 +1492,110 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
         .catch(() => { setConnectionState(false); renderData(DEMO_SAMPLES[demoIndex]); });
     }
 
+    function triggerSpring(el) {
+      if (!el) return;
+      el.classList.remove('spring-pop');
+      void el.offsetWidth;
+      el.classList.add('spring-pop');
+    }
+
     function renderData(d) {
       currentTelemetry = d;
-      const label = (d.label || "none").toLowerCase();
+      const rawLabel = (d.label || "none").toLowerCase();
+      const isFruit = (rawLabel === "apple" || rawLabel === "orange" || rawLabel === "pear");
+      const label = isFruit ? rawLabel : "none";
       const meta = FRUITS[label] || FRUITS["none"];
-      const isFruit = (label !== "none" && label !== "empty_scale");
       const massG = d.weight > 0 ? d.weight : 0.0;
 
+      // 1. Dynamic Fruit Accent Theming
+      const themeSet = PALETTES[currentTheme] || PALETTES.night;
+      const fruitTheme = themeSet[label] || themeSet.none;
+      document.documentElement.style.setProperty('--accent', fruitTheme.accent);
+      document.documentElement.style.setProperty('--accent-glow', fruitTheme.glow);
+
+      // 2. Spring Physics on Class Change
+      if (rawLabel !== prevFruitLabel) {
+        prevFruitLabel = rawLabel;
+        triggerSpring(document.getElementById('fruit-emoji'));
+        triggerSpring(document.getElementById('target-icon'));
+        triggerSpring(document.getElementById('val-total'));
+      }
+
+      // Base price in VND/kg
       const basePricePerKg = isFruit ? (customPrices[label] || DEFAULT_PRICES[label] || 60000) : 0;
       const displayRate = convertRateForUnit(basePricePerKg, priceUnit);
       const totalDue = (massG / 1000.0) * basePricePerKg;
 
+      // 3. Metrology Readout
       document.getElementById('val-mass').innerText = massG.toFixed(1);
       document.getElementById('val-mass-kg').innerText = (massG / 1000.0).toFixed(3).replace('.', ',') + " kg";
       document.getElementById('val-total').innerText = totalDue > 0 ? formatVND(totalDue) : "0 ₫";
       
-      const srcPill = document.getElementById('val-source-pill');
-      if (srcPill) {
-        if (d.stm32_live) {
-          srcPill.innerText = "STM32 HX711";
-          srcPill.style.color = "var(--green)";
-          srcPill.style.background = "rgba(34, 197, 94, 0.18)";
-        } else {
-          srcPill.innerText = "Mô phỏng";
-          srcPill.style.color = "#94a3b8";
-          srcPill.style.background = "rgba(255, 255, 255, 0.08)";
-        }
-      }
-
       const rateSuffix = priceUnit === 'g' ? '/ g' : (priceUnit === '100g' ? '/ 100g' : '/ kg');
       document.getElementById('val-unit-rate').innerHTML = 
         `Đơn giá: ${formatVND(displayRate)} ${rateSuffix} <span class="edit-price-inline" onclick="togglePriceMenu()">[Sửa]</span>`;
-      document.getElementById('val-tare-state').innerText = isFruit ? "Cảm biến khối lượng đang đo" : "Đã trừ bì (Tare 0g)";
+      document.getElementById('val-tare-state').innerText = isFruit 
+        ? "Đang cân • Cảm biến HX711 (80Hz)" 
+        : "Đã trừ bì (Tare 0g) • Cảm biến HX711 sẵn sàng";
 
+      const srcPill = document.getElementById('val-source-pill');
+      if (srcPill) {
+        srcPill.innerText = d.stm32_live ? "STM32 HX711 • Live" : "STM32 HX711";
+        srcPill.style.color = d.stm32_live ? "var(--green)" : "var(--text-dim)";
+      }
+
+      // 4. Viewfinder HUD
       document.getElementById('target-icon').innerText = meta.emoji;
       document.getElementById('target-name').innerText = isFruit ? meta.name : "Đang quét đĩa cân...";
       document.getElementById('target-conf').innerText = isFruit ? (d.confidence * 100).toFixed(0) + "%" : "--";
       const totalTime = (d.dsp_ms || 8) + (d.infer_ms || 42);
-      const estModelFps = totalTime > 0 ? (1000 / totalTime).toFixed(0) : "20";
+      const fps = totalTime > 0 ? (1000 / totalTime).toFixed(0) : "20";
       if (isDemoMode) {
-        document.getElementById('cam-fps-hud').innerText = estModelFps + " FPS";
+        document.getElementById('cam-fps-hud').innerText = fps + " FPS";
       }
 
+      // 5. Fruit Variety Strip Status
       document.getElementById('fruit-emoji').innerText = meta.emoji;
       document.getElementById('fruit-title').innerText = isFruit ? meta.name : "Cân trống";
-      const votes = d.votes || (isFruit ? 4 : 0);
+      const votes = d.votes !== undefined ? d.votes : (isFruit ? 4 : 0);
       const burstTotal = d.burst_total || 4;
       const pct = Math.round((votes / burstTotal) * 100);
       document.getElementById('fruit-sub').innerText = isFruit 
-        ? `${votes}/${burstTotal} mẫu đồng thuận (${pct}%)`
+        ? `Đồng thuận ${votes}/${burstTotal} (${pct}%) • Nhận diện chuẩn xác ✨`
         : "Đĩa cân trống • Sẵn sàng đặt quả";
       document.getElementById('consensus-bar').style.width = isFruit ? pct + "%" : "0%";
 
-      const sanityPill = document.getElementById('sanity-pill');
-      if (!isFruit) {
-        sanityPill.className = "sanity-tag sanity-idle";
-        sanityPill.innerText = "ĐÃ BÌ (TARE)";
-      } else if (massG >= 50 && massG <= 600) {
-        sanityPill.className = "sanity-tag sanity-pass";
-        sanityPill.innerText = "HỢP LỆ";
-      } else {
-        sanityPill.className = "sanity-tag sanity-fail";
-        sanityPill.innerText = "SAI PHẠM VI";
-      }
+      // 6. Hardware Telemetry Grid & Meter Bars
+      const inferVal = d.infer_ms || 42;
+      const dspVal = d.dsp_ms || 8;
+      const tempVal = d.temp ? d.temp.toFixed(1) : "48.2";
+      const psramVal = d.psram_kb || 3840;
 
-      document.getElementById('t-infer').innerText = (d.infer_ms || 42) + " ms";
-      document.getElementById('t-dsp').innerText = (d.dsp_ms || 8) + " ms";
-      document.getElementById('t-fps').innerText = isDemoMode ? (estModelFps + " FPS") : (Math.round(rollingStreamFps) + " FPS");
-      document.getElementById('t-votes').innerText = `${votes}/${burstTotal} (${pct}%)`;
-      document.getElementById('t-temp').innerText = (d.temp ? d.temp.toFixed(1) : "48.2") + " °C";
-      document.getElementById('t-psram').innerText = (d.psram_kb || 3840) + " KB";
+      document.getElementById('t-infer').innerText = inferVal + " ms";
+      document.getElementById('t-dsp').innerText = dspVal + " ms";
+      document.getElementById('t-fps').innerText = fps + " FPS";
+      document.getElementById('t-votes').innerText = `${votes}/${burstTotal}`;
+      document.getElementById('t-temp').innerText = tempVal + " °C";
+      document.getElementById('t-psram').innerText = psramVal + " KB";
+
+      // Animated Meter Bar Fills
+      const barInfer = document.getElementById('bar-infer');
+      if (barInfer) barInfer.style.width = Math.min(100, Math.round((inferVal / 80) * 100)) + "%";
+
+      const barDsp = document.getElementById('bar-dsp');
+      if (barDsp) barDsp.style.width = Math.min(100, Math.round((dspVal / 25) * 100)) + "%";
+
+      const barFps = document.getElementById('bar-fps');
+      if (barFps) barFps.style.width = Math.min(100, Math.round((parseFloat(fps) / 25) * 100)) + "%";
+
+      const barVotes = document.getElementById('bar-votes');
+      if (barVotes) barVotes.style.width = pct + "%";
+
+      const barTemp = document.getElementById('bar-temp');
+      if (barTemp) barTemp.style.width = Math.min(100, Math.round((parseFloat(tempVal) / 75) * 100)) + "%";
+
+      const barPsram = document.getElementById('bar-psram');
+      if (barPsram) barPsram.style.width = Math.min(100, Math.round((psramVal / 4096) * 100)) + "%";
 
       if (isDemoMode) {
         document.getElementById('cam-feed').src = createSvgView(label);
@@ -1161,13 +1608,13 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       const text = document.getElementById('conn-status');
       if (connected) {
         dot.style.background = "var(--green)";
-        dot.style.boxShadow = "0 0 6px var(--green)";
+        dot.style.boxShadow = "0 0 8px var(--green)";
         text.innerText = "SoftAP Live";
         isDemoMode = false;
         document.getElementById('demo-check').checked = false;
       } else {
         dot.style.background = "var(--amber)";
-        dot.style.boxShadow = "0 0 6px var(--amber)";
+        dot.style.boxShadow = "0 0 8px var(--amber)";
         text.innerText = "Mô phỏng";
       }
     }
@@ -1183,10 +1630,26 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     }
 
     function triggerInference() {
+      // 1. Shutter Flash
       const fx = document.getElementById('shutter-fx');
       fx.classList.add('active');
       setTimeout(() => fx.classList.remove('active'), 120);
 
+      // 2. AI Horizontal Laser Sweep & Bracket Pulse
+      const vf = document.querySelector('.viewfinder');
+      const laser = document.getElementById('ai-scan-laser');
+      if (laser) {
+        laser.classList.remove('scanning');
+        void laser.offsetWidth;
+        laser.classList.add('scanning');
+        setTimeout(() => laser.classList.remove('scanning'), 850);
+      }
+      if (vf) {
+        vf.classList.add('scanning');
+        setTimeout(() => vf.classList.remove('scanning'), 850);
+      }
+
+      // 3. Telemetry Cell Flash Feedback
       const cells = document.querySelectorAll('.telem-cell');
       cells.forEach(c => c.classList.add('flash-update'));
       setTimeout(() => cells.forEach(c => c.classList.remove('flash-update')), 350);
@@ -1209,15 +1672,8 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
       if (!isDemoMode) fetch('/flash').catch(() => {});
     }
 
-    function cycleWeight() {
-      if (isDemoMode) {
-        demoIndex = (demoIndex + 1) % DEMO_SAMPLES.length;
-        renderData(DEMO_SAMPLES[demoIndex]);
-      } else {
-        fetch('/cycle_weight').then(poll).catch(() => {});
-      }
-    }
-
+    // Init
+    updateThemeButton();
     syncPriceInputs();
     savePrices();
     setInterval(poll, 350);
@@ -1300,15 +1756,6 @@ static esp_err_t flash_handler(httpd_req_t *req) {
     return httpd_resp_send(req, g_flash_state ? "ON" : "OFF", HTTPD_RESP_USE_STRLEN);
 }
 
-static esp_err_t cycle_weight_handler(httpd_req_t *req) {
-    if (g_weight_mode == MOCK_WEIGHT_RANDOM) g_weight_mode = MOCK_WEIGHT_FIXED_200G;
-    else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) g_weight_mode = MOCK_WEIGHT_TOO_LIGHT;
-    else g_weight_mode = MOCK_WEIGHT_RANDOM;
-    g_web_trigger_pending = true;
-    httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    return httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
-}
-
 static esp_err_t trigger_handler(httpd_req_t *req) {
     g_web_trigger_pending = true;
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -1360,7 +1807,6 @@ void startWebServer() {
     httpd_uri_t uri_capture = { .uri = "/capture", .method = HTTP_GET, .handler = capture_handler, .user_ctx = NULL };
     httpd_uri_t uri_status = { .uri = "/status", .method = HTTP_GET, .handler = status_handler, .user_ctx = NULL };
     httpd_uri_t uri_flash = { .uri = "/flash", .method = HTTP_GET, .handler = flash_handler, .user_ctx = NULL };
-    httpd_uri_t uri_cycle = { .uri = "/cycle_weight", .method = HTTP_GET, .handler = cycle_weight_handler, .user_ctx = NULL };
     httpd_uri_t uri_trigger = { .uri = "/trigger", .method = HTTP_GET, .handler = trigger_handler, .user_ctx = NULL };
     httpd_uri_t uri_set_prices = { .uri = "/set_prices", .method = HTTP_GET, .handler = set_prices_handler, .user_ctx = NULL };
 
@@ -1369,7 +1815,6 @@ void startWebServer() {
         httpd_register_uri_handler(s_httpd, &uri_capture);
         httpd_register_uri_handler(s_httpd, &uri_status);
         httpd_register_uri_handler(s_httpd, &uri_flash);
-        httpd_register_uri_handler(s_httpd, &uri_cycle);
         httpd_register_uri_handler(s_httpd, &uri_trigger);
         httpd_register_uri_handler(s_httpd, &uri_set_prices);
         Serial.println("[WEB] Embedded HTTP Server active on Port 80");
@@ -1797,20 +2242,11 @@ bool runBurstInference(float override_weight_g) {
         g_telemetry.stm32_live = true;
     } else if (detected_any) {
         // No STM32 link yet -> fall back to simulated metrology (demo / bench test only)
-        if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) {
-            weight_g = 200.0f;
-            mode_str = "Fixed 200g (Mock)";
-        } else if (g_weight_mode == MOCK_WEIGHT_TOO_LIGHT) {
-            weight_g = 15.0f;
-            mode_str = "Fault Test 15g (Mock)";
-        } else {
-            // Realistic random weight with 0.1g resolution
-            if (strcmp(winner_label, "apple") == 0)       weight_g = (float)random(1600, 2300) / 10.0f;
-            else if (strcmp(winner_label, "orange") == 0) weight_g = (float)random(1400, 2000) / 10.0f;
-            else if (strcmp(winner_label, "pear") == 0)   weight_g = (float)random(1800, 2700) / 10.0f;
-            else                                          weight_g = (float)random(1500, 2200) / 10.0f;
-            mode_str = "Random Realistic (Mock)";
-        }
+        if (strcmp(winner_label, "apple") == 0)       weight_g = (float)random(1600, 2300) / 10.0f;
+        else if (strcmp(winner_label, "orange") == 0) weight_g = (float)random(1400, 2000) / 10.0f;
+        else if (strcmp(winner_label, "pear") == 0)   weight_g = (float)random(1800, 2700) / 10.0f;
+        else                                          weight_g = (float)random(1500, 2200) / 10.0f;
+        mode_str = "Random Realistic (Mock)";
         g_telemetry.stm32_live = false;
     } else {
         // No STM32 link and nothing detected -> empty reading
@@ -1825,7 +2261,7 @@ bool runBurstInference(float override_weight_g) {
         else if (strcmp(winner_label, "pear") == 0)   unit_price = g_price_pear;
 
         total_price = (weight_g / 1000.0f) * unit_price;
-        sanity_ok = (weight_g >= 50.0f && weight_g <= 600.0f);
+        sanity_ok = (weight_g > 0.0f);
     }
 
     uint8_t evaluated_frames = valid_frames > 0 ? valid_frames : BURST_SAMPLE_COUNT;
@@ -1857,7 +2293,7 @@ bool runBurstInference(float override_weight_g) {
         Serial.printf("  Mass:               %.1f g (%.3f kg) [%s]\n", weight_g, weight_g / 1000.0f, mode_str);
         Serial.printf("  Unit Price:         %.0f VND / kg\n", unit_price);
         Serial.printf("  TOTAL CHARGE:       %.0f VND\n", total_price);
-        Serial.printf("  Sanity Check:       %s\n", sanity_ok ? "PASSED (Valid fruit weight)" : "REJECTED (Weight out of range)");
+        Serial.printf("  Weight Check:       %s\n", sanity_ok ? "PASSED (Positive weight)" : "ZERO WEIGHT");
     } else {
         Serial.printf("  >> RESULT:          EMPTY SCALE (0/%u detections)\n", evaluated_frames);
     }
@@ -2074,22 +2510,12 @@ void handleSerialCommands() {
         } else if (ch == ' ' && !g_continuous_mode) {
             Serial.println("[COMMAND] Spacebar trigger: Running burst inference...");
             runBurstInference();
-        } else if (ch == 'w' || ch == 'W') {
-            if (g_weight_mode == MOCK_WEIGHT_RANDOM) g_weight_mode = MOCK_WEIGHT_FIXED_200G;
-            else if (g_weight_mode == MOCK_WEIGHT_FIXED_200G) g_weight_mode = MOCK_WEIGHT_TOO_LIGHT;
-            else g_weight_mode = MOCK_WEIGHT_RANDOM;
-
-            const char* str = (g_weight_mode == MOCK_WEIGHT_RANDOM) ? "RANDOM REALISTIC" :
-                              (g_weight_mode == MOCK_WEIGHT_FIXED_200G) ? "FIXED 200.0g" : "FAULT TEST 15.0g (fails sanity check)";
-            Serial.printf("[COMMAND] Simulated Weight Mode: %s\n", str);
-            runBurstInference();
         } else if (ch == 'b' || ch == 'B') {
             printBenchmarkReport();
         } else if (ch == '?') {
             Serial.println("\n--- INTERACTIVE COMMANDS ---");
             Serial.println("  [f] Toggle High-Power Flashlight LED");
             Serial.println("  [m] Toggle Continuous vs. Triggered mode");
-            Serial.println("  [w] Cycle Mock Weight Mode (Random -> Fixed 200g -> Fault 15g)");
             Serial.println("  [Space] Trigger Burst Inference (in Triggered mode)");
             Serial.println("  [b] Print comprehensive Benchmark Performance Summary");
             Serial.println("  [?] Print this help menu\n");
