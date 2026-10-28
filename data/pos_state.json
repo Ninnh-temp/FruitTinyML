@@ -1,0 +1,13 @@
+{
+  "next_order_no": 3,
+  "prices": {
+    "apple": 66000.0,
+    "orange": 40000.0,
+    "pear": 81000.0
+  },
+  "esp_ip": "192.168.4.1",
+  "auto_add": true,
+  "theme": "night",
+  "csv_pending_sync": false,
+  "last_saved": "2026-10-27 22:26:10"
+}

@@ -1,0 +1,3 @@
+﻿Order_ID,Order_No,Timestamp,Item_Count,Items_Summary,Total_Weight_g,Total_Amount_VND
+ORD-0001,1,2026-10-23 13:30:04,3,"Táo (215g), Cam (180g), Lê (245g)",640.0,37250
+ORD-0002,2,2026-10-23 17:59:58,3,"Táo (215g), Cam (180g), Lê (245g)",640.0,38110

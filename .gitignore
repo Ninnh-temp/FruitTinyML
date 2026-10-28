@@ -4,3 +4,5 @@
 .vscode/launch.json
 .vscode/ipch
 dataset
+__pycache__/
+*.pyc
