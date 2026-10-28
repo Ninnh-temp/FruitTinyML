@@ -94,7 +94,7 @@ struct LiveScaleTelemetry {
 // --- Camera & Inference Resolution ---
 #define CAMERA_RAW_WIDTH      320
 #define CAMERA_RAW_HEIGHT     240
-#define MAX_JPEG_BUF_SIZE     (20 * 1024) // 20 KB in Internal SRAM (320x240 Q12 JPEG is ~6-10 KB)
+#define MAX_JPEG_BUF_SIZE     (48 * 1024) // 48 KB in PSRAM (supports high-contrast Q12 QVGA frames)
 
 static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, false, false, 0, 0, 0, 0.0f, 0, BURST_SAMPLE_COUNT, false};
 
@@ -102,7 +102,9 @@ static LiveScaleTelemetry g_telemetry = {"none", 0.0f, 0, 0, 0, 0, 0.0f, 0.0f, 0
 static uint8_t  *snapshot_buf = nullptr;     // 320x240x3 RGB888 buffer in PSRAM
 static uint8_t  *ai_input_buf = nullptr;     // 96x96x3 RGB888 buffer in Fast Internal SRAM (27.6 KB)
 static uint32_t *resize_lut   = nullptr;     // Pre-computed 96x96 byte offset Lookup Table in RAM (36.8 KB)
-static uint8_t  *jpeg_stage_buf = nullptr;   // 32 KB compressed JPEG staging & stream cache in RAM
+static uint8_t  *jpeg_stage_buf = nullptr;   // 48 KB dedicated AI burst staging buffer in PSRAM
+static uint8_t  *web_jpeg_buf   = nullptr;   // 48 KB dedicated live web stream cache in PSRAM
+static SemaphoreHandle_t s_web_buf_mutex = NULL; // Mutex guarding web_jpeg_buf & g_cached_jpeg_len
 static volatile size_t g_cached_jpeg_len = 0;
 static volatile bool   g_burst_active = false;
 static volatile bool   g_web_trigger_pending = false;
@@ -1450,12 +1452,35 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 
     let lastFrameTime = performance.now();
     let rollingStreamFps = 12.0;
+    let currentBlobUrl = null;
+    let isStreaming = false;
+    let connFailCount = 0;
 
-    function updateFrame() {
+    async function updateFrame() {
       if (isDemoMode) return;
-      const view = document.getElementById('cam-feed');
-      const img = new Image();
-      img.onload = () => {
+      if (isStreaming) return;
+      isStreaming = true;
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
+
+      try {
+        const resp = await fetch('/capture?t=' + Date.now(), {
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const blob = await resp.blob();
+        if (blob.size < 100) throw new Error('Truncated frame');
+
+        const newUrl = URL.createObjectURL(blob);
+        const view = document.getElementById('cam-feed');
+        view.src = newUrl;
+        if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+        currentBlobUrl = newUrl;
+
         const now = performance.now();
         const dt = now - lastFrameTime;
         lastFrameTime = now;
@@ -1463,35 +1488,58 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
           rollingStreamFps = (rollingStreamFps * 0.75) + ((1000.0 / dt) * 0.25);
           document.getElementById('cam-fps-hud').innerText = Math.round(rollingStreamFps) + " FPS";
         }
-        view.src = img.src;
+        connFailCount = 0;
         setConnectionState(true);
-        setTimeout(updateFrame, 80);
-      };
-      img.onerror = () => {
+        isStreaming = false;
+        setTimeout(updateFrame, 60);
+      } catch (err) {
+        clearTimeout(timeoutId);
         handleImageError();
-        setTimeout(updateFrame, 1500);
-      };
-      img.src = '/capture?t=' + Date.now();
+        isStreaming = false;
+        setTimeout(updateFrame, 300);
+      }
     }
 
     function handleImageError() {
       if (!isDemoMode) {
-        setConnectionState(false);
-        renderData(DEMO_SAMPLES[demoIndex]);
+        connFailCount++;
+        if (connFailCount >= 6) {
+          setConnectionState(false);
+        }
       }
     }
 
-    function poll() {
+    let isPolling = false;
+    async function poll() {
       if (isDemoMode) {
         renderData(DEMO_SAMPLES[demoIndex]);
         return;
       }
-      fetch('/status')
-        .then(r => r.json())
-        .then(d => { setConnectionState(true); renderData(d); })
-        .catch(() => { setConnectionState(false); renderData(DEMO_SAMPLES[demoIndex]); });
-    }
+      if (isPolling) return;
+      isPolling = true;
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
+
+      try {
+        const resp = await fetch('/status', { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const d = await resp.json();
+        connFailCount = 0;
+        setConnectionState(true);
+        renderData(d);
+      } catch (e) {
+        clearTimeout(timeoutId);
+        connFailCount++;
+        if (connFailCount >= 6) {
+          setConnectionState(false);
+        }
+      } finally {
+        isPolling = false;
+        if (!isDemoMode) setTimeout(poll, 350);
+      }
+    }
     function triggerSpring(el) {
       if (!el) return;
       el.classList.remove('spring-pop');
@@ -1676,7 +1724,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
     updateThemeButton();
     syncPriceInputs();
     savePrices();
-    setInterval(poll, 350);
+
     poll();
     updateFrame();
   </script>
@@ -1698,31 +1746,56 @@ static esp_err_t capture_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
 
-    // Fast RAM Offload: If AI burst is running, serve latest cached JPEG straight from RAM
-    if (g_burst_active && jpeg_stage_buf && g_cached_jpeg_len > 0) {
-        return httpd_resp_send(req, (const char *)jpeg_stage_buf, g_cached_jpeg_len);
+    // 1. If AI burst is active, serve directly from dedicated web cache (never touch camera mutex)
+    if (g_burst_active) {
+        if (web_jpeg_buf && s_web_buf_mutex && xSemaphoreTake(s_web_buf_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            size_t len = g_cached_jpeg_len;
+            esp_err_t res = ESP_FAIL;
+            if (len > 0) {
+                res = httpd_resp_send(req, (const char *)web_jpeg_buf, len);
+            }
+            xSemaphoreGive(s_web_buf_mutex);
+            if (res == ESP_OK) return ESP_OK;
+        }
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
     }
 
+    // 2. Grab fresh camera frame with minimal mutex hold time (< 1ms copy, never hold across TCP)
     if (xSemaphoreTake(s_camera_mutex, pdMS_TO_TICKS(60)) == pdTRUE) {
         camera_fb_t *fb = esp_camera_fb_get();
         if (fb) {
-            if (jpeg_stage_buf && fb->len <= MAX_JPEG_BUF_SIZE) {
-                memcpy(jpeg_stage_buf, fb->buf, fb->len);
-                g_cached_jpeg_len = fb->len;
+            if (web_jpeg_buf && s_web_buf_mutex && xSemaphoreTake(s_web_buf_mutex, pdMS_TO_TICKS(150)) == pdTRUE) {
+                if (fb->len <= MAX_JPEG_BUF_SIZE) {
+                    memcpy(web_jpeg_buf, fb->buf, fb->len);
+                    g_cached_jpeg_len = fb->len;
+                }
+                xSemaphoreGive(s_web_buf_mutex);
             }
-            esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
             esp_camera_fb_return(fb);
             xSemaphoreGive(s_camera_mutex);
-            return res;
+
+            // Send over network OUTSIDE camera mutex from web buffer
+            if (web_jpeg_buf && s_web_buf_mutex && xSemaphoreTake(s_web_buf_mutex, pdMS_TO_TICKS(150)) == pdTRUE) {
+                esp_err_t res = httpd_resp_send(req, (const char *)web_jpeg_buf, g_cached_jpeg_len);
+                xSemaphoreGive(s_web_buf_mutex);
+                return res;
+            }
+        } else {
+            xSemaphoreGive(s_camera_mutex);
         }
-        xSemaphoreGive(s_camera_mutex);
     }
 
-    // Fallback to RAM cache if camera was momentarily busy (prevents HTTP 500 & 1500ms UI penalty)
-    if (jpeg_stage_buf && g_cached_jpeg_len > 0) {
-        return httpd_resp_send(req, (const char *)jpeg_stage_buf, g_cached_jpeg_len);
+    // 3. Fallback to web stream cache if camera was busy (prevents HTTP 500)
+    if (web_jpeg_buf && s_web_buf_mutex && xSemaphoreTake(s_web_buf_mutex, pdMS_TO_TICKS(150)) == pdTRUE) {
+        size_t len = g_cached_jpeg_len;
+        esp_err_t res = ESP_FAIL;
+        if (len > 0) {
+            res = httpd_resp_send(req, (const char *)web_jpeg_buf, len);
+        }
+        xSemaphoreGive(s_web_buf_mutex);
+        if (res == ESP_OK) return ESP_OK;
     }
-
     httpd_resp_send_500(req);
     return ESP_FAIL;
 }
@@ -1800,7 +1873,9 @@ void startWebServer() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.ctrl_port = 32768;
-    config.max_open_sockets = 6;
+    config.max_open_sockets = 7;
+    config.recv_wait_timeout = 2;
+    config.send_wait_timeout = 2;
     config.lru_purge_enable = true;
 
     httpd_uri_t uri_index = { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL };
@@ -1914,6 +1989,7 @@ void setup() {
 
     // Create FreeRTOS camera access mutex
     s_camera_mutex = xSemaphoreCreateMutex();
+    s_web_buf_mutex = xSemaphoreCreateMutex();
 
     // 1. Verify PSRAM
     if (psramFound()) {
@@ -1937,15 +2013,22 @@ void setup() {
         Serial.printf("[MEMORY] Allocated %u KB snapshot buffer successfully.\n", rgb_buf_size / 1024);
     }
 
-    jpeg_stage_buf = (uint8_t*)heap_caps_malloc(MAX_JPEG_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!jpeg_stage_buf) {
-        jpeg_stage_buf = (uint8_t*)ps_malloc(MAX_JPEG_BUF_SIZE);
-    }
-    if (!jpeg_stage_buf) {
-        Serial.println("[CRITICAL ERROR] Insufficient memory for JPEG staging buffer!");
+    jpeg_stage_buf = (uint8_t*)ps_malloc(MAX_JPEG_BUF_SIZE);
+    if (!jpeg_stage_buf) jpeg_stage_buf = (uint8_t*)malloc(MAX_JPEG_BUF_SIZE);
+    if (jpeg_stage_buf) {
+        Serial.printf("[MEMORY] Allocated %u KB AI JPEG staging buffer in PSRAM.\n", MAX_JPEG_BUF_SIZE / 1024);
     } else {
-        Serial.printf("[MEMORY] Allocated %u KB JPEG staging buffer in fast RAM.\n", MAX_JPEG_BUF_SIZE / 1024);
+        Serial.println("[CRITICAL ERROR] Insufficient memory for AI JPEG staging buffer!");
     }
+
+    web_jpeg_buf = (uint8_t*)ps_malloc(MAX_JPEG_BUF_SIZE);
+    if (!web_jpeg_buf) web_jpeg_buf = (uint8_t*)malloc(MAX_JPEG_BUF_SIZE);
+    if (web_jpeg_buf) {
+        Serial.printf("[MEMORY] Allocated %u KB web stream buffer in PSRAM.\n", MAX_JPEG_BUF_SIZE / 1024);
+    } else {
+        Serial.println("[CRITICAL ERROR] Insufficient memory for web stream buffer!");
+    }
+
 
     // Allocate ai_input_buf (96 * 96 * 3 = 27,648 bytes) in Fast Internal SRAM
     size_t ai_buf_size = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT * 3;
@@ -1974,6 +2057,7 @@ void setup() {
     // 3. Start Wi-Fi SoftAP FIRST (Guarantees Wi-Fi is NEVER blocked by cold camera)
     Serial.println("\n[WIFI] Initializing SoftAP...");
     WiFi.mode(WIFI_AP);
+    WiFi.setSleep(false);
     WiFi.setTxPower(WIFI_POWER_15dBm);
     WiFi.softAP(AP_SSID, AP_PASS, 6);
     Serial.printf("  --> SoftAP SSID: %s\n", AP_SSID);
@@ -2055,7 +2139,14 @@ bool runBurstInference(float override_weight_g) {
                 if (fb->len <= MAX_JPEG_BUF_SIZE) {
                     memcpy(jpeg_stage_buf, fb->buf, fb->len);
                     jpeg_len = fb->len;
-                    g_cached_jpeg_len = fb->len; // Keep live stream cache fresh
+                }
+                // Keep live web stream cache fresh under s_web_buf_mutex
+                if (web_jpeg_buf && s_web_buf_mutex && xSemaphoreTake(s_web_buf_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                    if (fb->len <= MAX_JPEG_BUF_SIZE) {
+                        memcpy(web_jpeg_buf, fb->buf, fb->len);
+                        g_cached_jpeg_len = fb->len;
+                    }
+                    xSemaphoreGive(s_web_buf_mutex);
                 }
                 esp_camera_fb_return(fb);
             }
